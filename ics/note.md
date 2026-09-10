@@ -1,0 +1,26 @@
+### Initial conditions
+
+- defaults
+  - Two default examples: trappist 1, and kepler 36
+- init_Nbody
+  - Set Amatrix 
+  - Compute the derivate of Amatrix
+  - 
+- initial_conditions
+  - Elements
+  - ElementsIC
+  - CartesianIC
+- kepler_init
+  - kepler matrix intialization
+  - _kepler_init_jax
+- kepler
+  - ekepler 1 : Solve the Kepler equation with Newton's method $M = E - esin(E)$.
+    - Define $de = E - M$, then $g(de) = de - esin(M+de)$
+    - Newton's method : $de_{new} = de - \frac{g(de)}{g'(de)}$
+  - ekepler 2 : maybe converge faster...some tricks
+    - $g(E) = E - M -esin(E)$
+  - kepler : eccentric anomaly to true anomaly
+    - $tan(f/2) = \sqrt{\frac{1+e}{1-e}}tan(E/2)$
+- setup_hierarchy
+  - Create hierarchy array matrix
+  - 
