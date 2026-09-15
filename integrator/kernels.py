@@ -28,7 +28,7 @@ def integrate_transit_output_grad(s, d, output, *, scheme_grad, h, nsteps,):
     Integrate for a fixed number of steps and detect transits.
     scheme_grad must have the interface:
 
-        s_new, d_new = scheme_grad(s, d, h)
+        s_new, d_new, transit_new = scheme_grad(s, d, h)
     """
     t0 = state_time(s)
     output = initialize_gsave_vmap(s,output,)
@@ -38,7 +38,7 @@ def integrate_transit_output_grad(s, d, output, *, scheme_grad, h, nsteps,):
 
         # State before this integration step.
         state_prior = state
-        derivatives_prior = derivatives
+        #derivatives_prior = derivatives
 
         # Advance one complete step.
         state, derivatives = scheme_grad(state, derivatives, h,)
@@ -51,7 +51,6 @@ def integrate_transit_output_grad(s, d, output, *, scheme_grad, h, nsteps,):
                 state_current=state,
                 derivatives_current=derivatives,
                 state_prior=state_prior,
-                derivatives_prior=derivatives_prior,
                 output=transit_output,
                 h=h,
                 scheme_grad=scheme_grad,
@@ -61,7 +60,7 @@ def integrate_transit_output_grad(s, d, output, *, scheme_grad, h, nsteps,):
 
     return lax.fori_loop(0, nsteps, body_fun, (s, d, output),)
 
-@partial(jax.jit, static_argnames=("scheme_no_grad","nsteps"),)
+@partial(jax.jit, static_argnames=("scheme_no_grad",),)
 def integrate_transit_output_no_grad(s, output, *, scheme_no_grad, h, nsteps,):
     """
     Integrate without propagating Jacobians.
@@ -118,38 +117,26 @@ def detect_transit_no_grad(*, state_current, state_prior, output, h, scheme_no_g
     updated_output = output
 
     for occultor in output.occs:
-        gi = g_func(output.ti, occultor,state_current.x, state_current.v,)
+        gi = g_func(output.ti, occultor, state_current.x, state_current.v,)
 
         g_previous = updated_output.gsave[occultor]
         ri = jnp.linalg.norm(state_current.x[:, occultor])
-        candidate = ((gi > 0.0) & (g_previous < 0.0)& (-state_current.x[2, occultor] > 0.25 * ri) & (ri < rstar))
+        candidate = ((gi > 0.0) & (g_previous < 0.0) & (-state_current.x[2, occultor] > 0.25 * ri) & (ri < rstar))
 
         old_count = updated_output.count[occultor]
         new_count = (old_count + candidate.astype(updated_output.count.dtype))
 
-        updated_output = replace(
-            updated_output,
-            count=updated_output.count.at[occultor].set(new_count),
-            gsave=updated_output.gsave.at[occultor].set(gi),)
 
         should_store = (candidate & (new_count <= updated_output.ntt))
         storage_index = jnp.maximum(new_count - 1,0,)
 
-        denominator = gi - g_previous
-        eps = jnp.finfo(gi.dtype).eps
-
-        safe_denominator = jnp.where(jnp.abs(denominator) > eps,
-            denominator,
-            jnp.where(denominator >= 0.0, eps, -eps,),)
-
         # Julia:
-        # dt0 = -gi * intr.h / (gi - gsave)
-        dt_initial = (-g_previous * jnp.asarray(h, dtype=gi.dtype) / safe_denominator)
-
+        # dt0 = -gi * intr.h / (gi - gsave[i])
+        dt_initial = (- gi * h / (gi - g_previous))
         updated_output = lax.cond(
             should_store,
             lambda current_output: record_transit_no_grad(
-                state_prior=state_prior,
+                state_anchor=state_current,
                 output=current_output,
                 occultor=occultor,
                 storage_index=storage_index,
@@ -159,19 +146,23 @@ def detect_transit_no_grad(*, state_current, state_prior, output, h, scheme_no_g
             lambda current_output: current_output,
             updated_output,
         )
-
+        updated_output = replace(
+                    updated_output,
+                    count=updated_output.count.at[occultor].set(new_count),
+                    gsave=updated_output.gsave.at[occultor].set(gi),)
+    
     return state_current, updated_output
 
-def record_transit_no_grad(*, state_prior, output, occultor, storage_index, dt_initial, scheme_no_grad,):
+def record_transit_no_grad(*, state_anchor, output, occultor, storage_index, dt_initial, scheme_no_grad,):
     state_transit, dt_transit = find_transit_no_grad(
-        state_prior,
+        state_anchor,
         transited_body=output.ti,
         occultor=occultor,
         dt_initial=dt_initial,
         scheme_no_grad=scheme_no_grad,
     )
 
-    transit_time = (state_prior.t[0] + dt_transit)
+    transit_time = (state_anchor.t[0] + dt_transit)
 
     if isinstance(output, TransitTiming):
         new_tt = output.tt.at[occultor, storage_index,].set(transit_time)
@@ -199,28 +190,22 @@ def detect_transit_grad( *, state_current, state_prior, derivatives_current, out
 
     Parameters
     ----------
-    state_current
-        State after one complete integration step.
+    state_current: State after one complete integration step.
 
-    state_prior
-        State at the beginning of that step.
+    state_prior: State at the beginning of that step.
 
-    derivatives_current
-        Current Derivatives PyTree. It is used as a structural template
+    derivatives_current: Current Derivatives PyTree. It is used as a structural template
         by the Newton transit refinement.
 
-    output
-        TransitTiming or TransitParameters.
+    output: TransitTiming or TransitParameters.
 
-    h
-        Full integration step used between state_prior and state_current.
+    h: Full integration step used between state_prior and state_current.
 
-    scheme_grad
-        Gradient-enabled integration scheme.
+    scheme_grad: Gradient-enabled integration scheme.
 
     Returns
     -------
-    Updated transit output.
+    Updated transit output: state_current, derivatives_current,updated_output
     """
     dtype = state_current.x.dtype
 
@@ -254,27 +239,16 @@ def detect_transit_grad( *, state_current, state_prior, derivatives_current, out
         should_store = (candidate& (new_count <= updated_output.ntt))
         storage_index = jnp.maximum(new_count - 1,jnp.asarray(0,dtype=new_count.dtype,),)
 
-        denominator = gi - g_previous
-        eps = jnp.finfo(dtype).eps
-
-        safe_denominator = jnp.where(jnp.abs(denominator) > eps,
-            denominator,
-            jnp.where(
-                denominator >= 0.0,
-                eps,
-                -eps,
-            ),)
-
         # Linear-interpolation initial estimate.
         #
         # Julia:
         # dt0 = -gi * intr.h / (gi - tt.gsave[i])
-        dt_initial = (-g_previous * jnp.asarray(h, dtype=dtype) / safe_denominator)
+        dt_initial = (-gi * h / (gi - g_previous))
 
         updated_output = lax.cond(
             should_store,
             lambda current_output: record_transit_grad(
-                state_prior=state_prior,
+                state_anchor=state_current,
                 derivatives_template=derivatives_current,
                 output=current_output,
                 occultor=occultor,
@@ -288,7 +262,7 @@ def detect_transit_grad( *, state_current, state_prior, derivatives_current, out
 
     return state_current, derivatives_current,updated_output
 
-def record_transit_grad(*, state_prior, derivatives_template, output, occultor, storage_index, dt_initial, scheme_grad,):
+def record_transit_grad(*, state_anchor, derivatives_template, output, occultor, storage_index, dt_initial, scheme_grad,):
     """
     Refine and record one detected transit with derivatives.
 
@@ -328,7 +302,7 @@ def record_transit_grad(*, state_prior, derivatives_template, output, occultor, 
     """
     state_transit, derivatives_transit, dt_transit = (
         find_transit_grad(
-            state_prior,
+            state_anchor,
             derivatives_template,
             transited_body=output.ti,
             occultor=occultor,
@@ -337,7 +311,7 @@ def record_transit_grad(*, state_prior, derivatives_template, output, occultor, 
         )
     )
 
-    transit_time = state_prior.t[0] + dt_transit
+    transit_time = state_anchor.t[0] + dt_transit
 
     if isinstance(output, TransitTiming):
         _, derivatives = dtbvdq(

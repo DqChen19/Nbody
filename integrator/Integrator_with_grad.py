@@ -14,7 +14,6 @@ from .snapshot import calc_dbvdq,calc_dbvdelements
 from .kernels import integrate_transit_output_grad
 from .Transits import TransitParameters, TransitSnapshot, TransitTiming
 from .ahl21.ahl21 import ahl21
-from .ahl21.ahl21_no_grad import ahl21_no_grad
 
 NDIM    = 3
 Array = jax.Array
@@ -27,7 +26,7 @@ def check_step(t0, tmax) -> float:
     return jnp.where(jnp.abs(tmax) > jnp.abs(t0), sign_tmax, jnp.where(sign_tmax != jnp.sign(t0), sign_tmax, -sign_tmax,),)
 
 
-@partial(jax.jit, static_argnames=("scheme_grad", "nsteps"),)
+@partial(jax.jit, static_argnames=("scheme_grad",),)
 def _run_n_steps_grad(s: State, d: Derivatives, h: Array, *, scheme_grad: Callable, nsteps: int,):
     """
     Perform nsteps using the gradient propagation scheme.
@@ -74,7 +73,7 @@ class Integrator:
         return cls(scheme_grad=scheme_grad, h=h, tmax=tmax, t0=t0,)
     
     def __call__(self, s: State, arg: Optional[Any] = None, derivatives: Optional[Derivatives] = None, 
-                 *,grad: bool = True, return_arrays: bool = False,):
+                 *, return_arrays: bool = False,):
         """
         Supported calls for dispatch
         """
@@ -220,7 +219,7 @@ class Integrator:
             return s, output
 
 
-    def _call_snapshot(self, s, output, derivatives: Optional[Derivatives] = None, *, grad: bool, return_arrays: bool,):
+    def _call_snapshot(self, s, output, derivatives: Optional[Derivatives] = None, *, return_arrays: bool,):
         if derivatives is None:
             derivatives = Derivatives.create(s.n)
         vsky = output.vsky

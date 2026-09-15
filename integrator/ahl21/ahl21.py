@@ -15,9 +15,8 @@ YEAR  = 365.242
 GNEWT = 39.4845 / (YEAR * YEAR)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Public entry point  (matches scheme_grad interface)
-# ─────────────────────────────────────────────────────────────────────────────
+# ahl 21: matches scheme_grad interface 
+
 def ahl21(state: State, d: Derivatives, h: Array):
     """
     One AHL21 step with full Jacobian and dq/dt tracking.
@@ -37,7 +36,7 @@ def ahl21(state: State, d: Derivatives, h: Array):
     d = d.zero_out()
     s = replace(state, dqdt=jnp.zeros(sevn, dtype=dtype))
 
-    # ── Step 1: kickfast(h/6) ───────────────────────────────────────────────
+    # # 1. Fast kick(h/6)
     s, d = _kickfast_grad(s, d, h6)
     d = replace(d, dqdt_kick=d.dqdt_kick / jnp.asarray(6.0, dtype=dtype))
     tmp7n = d.jac_kick @ s.dqdt
@@ -46,20 +45,17 @@ def ahl21(state: State, d: Derivatives, h: Array):
     js, je = comp_sum_matrix(s.jac_step, s.jac_error, jac_copy)
     s = replace(s, jac_step=js, jac_error=je)
 
-    # ── Step 2: drift_grad(h/2) ─────────────────────────────────────────────
+    # 2. Half drift.
     s = _drift_grad(s, h2)
-    # dqdt update for drift (first occurrence → set, not add)
+    # dqdt update for drift (first occurrence, set)
     dqdt = s.dqdt
     for i in range(n):
         indi = i * 7
         for k in range(3):
-            dqdt = dqdt.at[indi + k].set(
-                jnp.asarray(0.5, dtype=dtype) * s.v[k, i]
-                + h2 * s.dqdt[indi + 3 + k]
-            )
+            dqdt = dqdt.at[indi + k].set(jnp.asarray(0.5, dtype=dtype) * s.v[k, i]+ h2 * s.dqdt[indi + 3 + k])
     s = replace(s, dqdt=dqdt)
 
-    # ── Step 3: forward Kepler loop ─────────────────────────────────────────
+    # 3.forward Kepler loop
     for i in range(n - 1):
         indi = i * 7
         for j in range(i + 1, n):
@@ -67,7 +63,7 @@ def ahl21(state: State, d: Derivatives, h: Array):
             if not s.pair[i][j]:
                 s, d = _kepler_step(s, d, i, j, indi, indj, sevn, h2, True)
 
-    # ── Step 4: phic + phisalpha ────────────────────────────────────────────
+    #4. Kick-pair correction.
     s, d = _phic_grad(s, d, h)
     s, d = _phisalpha_grad(s, d, h, two)
     jac_copy = d.jac_phi @ s.jac_step
@@ -76,7 +72,7 @@ def ahl21(state: State, d: Derivatives, h: Array):
     js, je = comp_sum_matrix(s.jac_step, s.jac_error, jac_copy)
     s = replace(s, jac_step=js, jac_error=je)
 
-    # ── Step 5: backward Kepler loop ────────────────────────────────────────
+    #5. backward Kepler
     for i in range(n - 2, -1, -1):
         indi = i * 7
         for j in range(n - 1, i, -1):
@@ -84,19 +80,16 @@ def ahl21(state: State, d: Derivatives, h: Array):
             if not s.pair[i][j]:
                 s, d = _kepler_step(s, d, i, j, indi, indj, sevn, h2, False)
 
-    # ── Step 6: drift_grad(h/2) ─────────────────────────────────────────────
+    #6. drift_grad(h/2)
     s = _drift_grad(s, h2)
     dqdt = s.dqdt
     for i in range(n):
         indi = i * 7
         for k in range(3):
-            dqdt = dqdt.at[indi + k].add(
-                jnp.asarray(0.5, dtype=dtype) * s.v[k, i]
-                + h2 * s.dqdt[indi + 3 + k]
-            )
+            dqdt = dqdt.at[indi + k].add(jnp.asarray(0.5, dtype=dtype) * s.v[k, i]+ h2 * s.dqdt[indi + 3 + k])
     s = replace(s, dqdt=dqdt)
 
-    # ── Step 7: final kickfast(h/6) ─────────────────────────────────────────
+    #7. final kickfast(h/6)
     d = replace(d, dqdt_kick=jnp.zeros(sevn, dtype=dtype))
     s, d = _kickfast_grad(s, d, h6)
     d = replace(d, dqdt_kick=d.dqdt_kick / jnp.asarray(6.0, dtype=dtype))
@@ -109,9 +102,7 @@ def ahl21(state: State, d: Derivatives, h: Array):
     return s, d
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Drift with Jacobian
-# ─────────────────────────────────────────────────────────────────────────────
 def _drift_grad(s: State, h: Array) -> State:
     x, xerror = comp_sum(s.x, s.xerror, h * s.v)
     jac_step  = s.jac_step
@@ -128,9 +119,7 @@ def _drift_grad(s: State, h: Array) -> State:
     return replace(s, x=x, xerror=xerror, jac_step=jac_step, jac_error=jac_error)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Fast kick with Jacobian
-# ─────────────────────────────────────────────────────────────────────────────
 def _kickfast_grad(s: State, d: Derivatives, h: Array):
     n     = s.n
     dtype = s.x.dtype
@@ -505,8 +494,7 @@ def _phisalpha_grad(s: State, d: Derivatives, h: Array, alpha: Array):
                 return v_c, ve_c, jph_c, dqph_c
 
             if not s.pair[i][j]:
-                v, verror, jac_phi, dqdt_phi = _second(
-                    (v, verror, jac_phi, dqdt_phi))
+                v, verror, jac_phi, dqdt_phi = _second((v, verror, jac_phi, dqdt_phi))
 
     s = replace(s, v=v, verror=verror)
     d = replace(d, jac_phi=jac_phi, dqdt_phi=dqdt_phi)
@@ -929,7 +917,7 @@ def _compute_jacobian_gamma(params, x0: Array, v0: Array, drift_first: bool):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helpers
+# Helpful functions
 # ─────────────────────────────────────────────────────────────────────────────
 def _cbrt(x):
     return jnp.sign(x) * jnp.abs(x) ** (1.0 / 3.0)

@@ -255,7 +255,7 @@ def _jac_delxv_gamma_no_grad(x0: Array, v0: Array, k: Array, h: Array, *, drift_
         return (keep_going & (iteration < 20))
 
     def body(carry):
-        gamma, gamma1, gamma2, iteration, _ = carry
+        gamma, gamma1, _, iteration, _ = carry
 
         new_gamma2 = gamma1
         new_gamma1 = gamma

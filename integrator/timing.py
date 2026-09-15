@@ -137,7 +137,6 @@ def calc_dtdelements(s, tt):
     dtdq0 = tt.dtdq0 # (n, ntt, 7, n)
     dtdq_flat = (jnp.swapaxes(dtdq0, -1, -2).reshape(n, tt.ntt, 7 * n)) #(n, ntt, 7*n)
     result_flat = jnp.einsum("...p,pq->...q", dtdq_flat,s.jac_init,) # (n, ntt, 7*n) @ (7*n, 7*n)
-
     # Return to (n, ntt, 7, n).
     dtdelements = jnp.swapaxes(result_flat.reshape(n, tt.ntt, n, 7), -1,-2,)
 
@@ -166,14 +165,14 @@ def calc_dtbvdelements(s, tt):
 def zero_derivatives(d):
     return jax.tree_util.tree_map(jnp.zeros_like, d,)
 
-def find_transit_grad(s_prior, d_template,*, transited_body: int, 
+def find_transit_grad(s_anchor, d_template,*, transited_body: int, 
                       occultor: int, dt_initial, scheme_grad: Callable,):
     """
     Refine the transit-time offset using Newton iteration.
 
     Parameters
     ----------
-    s_prior: State at the beginning of the enclosing integration step.
+    s_anchor: State at the beginning of the enclosing integration step.
     d_template: Derivatives object with the correct PyTree structure.
     transited_body: Usually the central star.
     occultor: Candidate transiting body.
@@ -189,7 +188,7 @@ def find_transit_grad(s_prior, d_template,*, transited_body: int,
     d_transit: Derivatives evaluated at the refined transit offset.
     dt_transit: Refined time offset relative to s_prior.t[0].
     """
-    dtype = s_prior.x.dtype
+    dtype = s_anchor.x.dtype
 
     dt0 = jnp.asarray(dt_initial, dtype=dtype)
     stmp = jnp.asarray(0.0, dtype=dtype)
@@ -198,11 +197,10 @@ def find_transit_grad(s_prior, d_template,*, transited_body: int,
     previous_2 = dt0 + jnp.asarray(2.0, dtype=dtype)
 
     iteration = jnp.asarray(0, dtype=jnp.int32)
-
     d_zero = zero_derivatives(d_template)
 
     # Initial placeholder. It will be overwritten in the first iteration.
-    s_trial = s_prior
+    s_trial = s_anchor
     d_trial = d_zero
 
     carry = (dt0, stmp, previous_1, previous_2, iteration, s_trial, d_trial,)
@@ -218,7 +216,7 @@ def find_transit_grad(s_prior, d_template,*, transited_body: int,
         new_old_1 = dt_estimate
 
         d_start = zero_derivatives(d_template)
-        s_new, d_new = scheme_grad(s_prior, d_start, dt_estimate,)
+        s_new, d_new = scheme_grad(s_anchor, d_start, dt_estimate,)
 
         gsky = g_func(transited_body, occultor, s_new.x, s_new.v,)
         gdot = gd_func(transited_body, occultor, s_new.x, s_new.v, s_new.dqdt,)
@@ -229,29 +227,31 @@ def find_transit_grad(s_prior, d_template,*, transited_body: int,
         correction = -gsky / safe_gdot
 
         # JAX form of compensated summation.
-        updated_dt = dt_estimate + correction
-        updated_compensation = (updated_dt - dt_estimate) - correction
-
+        y = correction - compensation
+        t = dt_estimate + y
+        updated_compensation = (t - dt_estimate) - y
+        updated_dt = t
+        
         return (updated_dt, updated_compensation, new_old_1, new_old_2, iteration + 1, s_new, d_new,)
 
     (dt_final, _, _, _, _, _, _,) = lax.while_loop(cond_fun, body_fun, carry,)
 
     # Julia recomputes the state and derivatives once at the final dt.
     d_final_start = zero_derivatives(d_template)
-    s_final, d_final = scheme_grad(s_prior, d_final_start, dt_final,)
+    s_final, d_final = scheme_grad(s_anchor, d_final_start, dt_final,)
 
     return s_final, d_final, dt_final
 
-def find_transit_no_grad(s_prior, *, transited_body: int, occultor: int, dt_initial, scheme_no_grad: Callable,):
+def find_transit_no_grad(s_anchor, *, transited_body: int, occultor: int, dt_initial, scheme_no_grad: Callable,):
     """No-gradient counterpart of find_transit_grad."""
-    dtype = s_prior.x.dtype
+    dtype = s_anchor.x.dtype
 
     dt0 = jnp.asarray(dt_initial, dtype=dtype)
     previous_1 = dt0 + jnp.asarray(1.0, dtype=dtype)
     previous_2 = dt0 + jnp.asarray(2.0, dtype=dtype)
     iteration = jnp.asarray(0, dtype=jnp.int32)
 
-    carry = (dt0, previous_1, previous_2, iteration, s_prior,)
+    carry = (dt0, previous_1, previous_2, iteration, s_anchor,)
 
     def cond_fun(carry):
         dt_estimate, old_1, old_2, iteration, _ = carry
@@ -264,273 +264,18 @@ def find_transit_no_grad(s_prior, *, transited_body: int, occultor: int, dt_init
         new_old_2 = old_1
         new_old_1 = dt_estimate
         ###############
-        s_trial = scheme_no_grad(s_prior, dt_estimate,) #here used the ahl21_no_grad!!
+        s_trial = scheme_no_grad(s_anchor, dt_estimate,) #here used the ahl21_no_grad!!
         ###############
         gsky = g_func(transited_body, occultor, s_trial.x, s_trial.v,)
         gdot = gd_func(transited_body,occultor, s_trial.x, s_trial.v, s_trial.dqdt,)
 
-        eps = jnp.finfo(dtype).eps
-
-        safe_gdot = jnp.where(jnp.abs(gdot) > eps, gdot, jnp.where(gdot >= 0, eps, -eps),)
-
-        correction = - gsky / safe_gdot
+       
+        correction = - gsky / gdot
         updated_dt = dt_estimate + correction
 
         return (updated_dt, new_old_1, new_old_2, iteration + 1, s_trial,)
 
     (dt_final, _, _, _, _,)  = lax.while_loop(cond_fun, body_fun, carry,) ###
-    s_final = scheme_no_grad(s_prior,dt_final,)
+    s_final = scheme_no_grad(s_anchor,dt_final,)
 
     return s_final, dt_final
-
-def _record_timing_grad(tt, s_prior, d_template,*, occultor: int,storage_index, dt_initial, scheme_grad: Callable,):
-    s_transit, d_transit, dt_transit = find_transit_grad(s_prior,d_template,
-                transited_body=tt.ti, occultor=occultor, dt_initial=dt_initial, scheme_grad=scheme_grad,)
-
-    transit_time = s_prior.t[0] + dt_transit
-    _, derivatives = dtbvdq(s_transit, tt.ti, occultor, include_bv=False,)
-
-    new_tt_array = tt.tt.at[occultor,storage_index,].set(transit_time)
-    new_dtdq0 = tt.dtdq0.at[occultor, storage_index,:, :,].set(derivatives[0])
-
-    return replace(tt,tt=new_tt_array,dtdq0=new_dtdq0,)
-
-def _record_timing_no_grad(tt, s_prior,*, occultor: int, storage_index, dt_initial, scheme_no_grad: Callable,):
-    _, dt_transit = find_transit_no_grad(s_prior, transited_body=tt.ti,
-        occultor=occultor, dt_initial=dt_initial, scheme_no_grad=scheme_no_grad,)
-
-    transit_time = s_prior.t[0] + dt_transit
-    new_tt_array = tt.tt.at[occultor,storage_index,].set(transit_time)
-
-    return replace(tt, tt=new_tt_array,)
-
-def _record_parameters_grad(tt, s_prior, d_template, *,
-    occultor: int, storage_index, dt_initial, scheme_grad: Callable,):
-    s_transit, _, dt_transit = find_transit_grad(s_prior, d_template,transited_body=tt.ti,
-                                            occultor=occultor, dt_initial=dt_initial, scheme_grad=scheme_grad,)
-
-    transit_time = s_prior.t[0] + dt_transit
-
-    observables, derivatives = dtbvdq( s_transit, tt.ti, occultor, include_bv=True,)
-
-    vsky = observables[0]
-    bsky2 = observables[1]
-
-    new_ttbv = (
-        tt.ttbv.at[0, occultor, storage_index].set(transit_time)
-        .at[1, occultor, storage_index].set(vsky)
-        .at[2, occultor, storage_index].set(bsky2))
-
-    new_dtbvdq0 = tt.dtbvdq0.at[:, occultor, storage_index, :, :,].set(derivatives)
-
-    return replace(tt, ttbv=new_ttbv, dtbvdq0=new_dtbvdq0,)
-
-def _record_parameters_no_grad(tt,s_prior,*, occultor: int, storage_index, dt_initial,scheme_no_grad: Callable,):
-    s_transit, dt_transit = find_transit_no_grad(s_prior, transited_body=tt.ti, occultor=occultor,
-                            dt_initial=dt_initial,scheme_no_grad=scheme_no_grad,)
-
-    transit_time = s_prior.t[0] + dt_transit
-    vsky = calc_vsky(s_transit.v, tt.ti, occultor)
-    bsky2 = calc_bsky2(s_transit.x, tt.ti, occultor)
-
-    new_ttbv = (
-        tt.ttbv.at[0, occultor, storage_index].set(transit_time)
-        .at[1, occultor, storage_index].set(vsky)
-        .at[2, occultor, storage_index].set(bsky2))
-
-    return replace(tt, ttbv=new_ttbv,)
-
-def detect_timing_transits_grad(s_prior, s_current, d_current, tt, *, h, scheme_grad: Callable,):
-    """
-    Detect TransitTiming events between s_prior and s_current.
-
-    Important
-    ---------
-    tt.occs should preferably be a static Python tuple of body indices,
-    not a traced JAX array.
-    """
-    rstar = jnp.asarray(1.0e12, dtype=s_current.x.dtype)
-
-    updated_tt = tt
-
-    for occultor in tt.occs:
-        gi = g_func(tt.ti, occultor, s_current.x,s_current.v,)
-        g_previous = updated_tt.gsave[occultor]
-        # Preserve the original Julia condition.
-        ri = jnp.sqrt(jnp.sum(s_current.x[:, occultor] ** 2))
-        in_front = (-s_current.x[2, occultor] > 0.25 * ri)
-        candidate = ((gi > 0.0) & (g_previous < 0.0) & in_front & (ri < rstar))
-        old_count = updated_tt.count[occultor]
-        new_count = old_count + candidate.astype( updated_tt.count.dtype)
-        new_count_array = updated_tt.count.at[occultor].set(new_count)
-        new_gsave = updated_tt.gsave.at[occultor].set(gi)
-        updated_tt = replace(updated_tt,count=new_count_array,gsave=new_gsave,)
-        should_store = (candidate & (new_count <= updated_tt.ntt))
-        storage_index = jnp.maximum(new_count - 1,0,)
-        denominator = gi - g_previous
-
-        safe_denominator = jnp.where(
-            jnp.abs(denominator) > jnp.finfo(gi.dtype).eps,
-            denominator,
-            jnp.where(denominator >= 0,
-                jnp.finfo(gi.dtype).eps,
-                -jnp.finfo(gi.dtype).eps,
-            ), )
-
-        dt_initial = (-g_previous * jnp.asarray(h, dtype=gi.dtype) / safe_denominator)
-
-        updated_tt = lax.cond(should_store, lambda current_tt: _record_timing_grad(
-                current_tt,s_prior,d_current,occultor=occultor,
-                storage_index=storage_index,dt_initial=dt_initial,scheme_grad=scheme_grad,),
-            lambda current_tt: current_tt,
-            updated_tt,
-        )
-
-    return updated_tt
-
-def detect_timing_transits_no_grad(s_prior, s_current, tt, *, h, scheme_no_grad: Callable,):
-    rstar = jnp.asarray(1.0e12, dtype=s_current.x.dtype)
-
-    updated_tt = tt
-
-    for occultor in tt.occs:
-        gi = g_func(tt.ti, occultor, s_current.x, s_current.v,)
-        g_previous = updated_tt.gsave[occultor]
-        ri = jnp.sqrt(jnp.sum(s_current.x[:, occultor] ** 2))
-        candidate = ((gi > 0.0)& (g_previous < 0.0)
-            & (-s_current.x[2, occultor]> 0.25 * ri)
-            & (ri < rstar))
-        old_count = updated_tt.count[occultor]
-        new_count = old_count + candidate.astype(updated_tt.count.dtype)
-        updated_tt = replace(updated_tt,
-            count=updated_tt.count.at[occultor].set(new_count),
-            gsave=updated_tt.gsave.at[occultor].set(gi),)
-        should_store = (candidate & (new_count <= updated_tt.ntt))
-        storage_index = jnp.maximum(new_count - 1, 0,)
-
-        denominator = gi - g_previous
-        eps = jnp.finfo(gi.dtype).eps
-
-        safe_denominator = jnp.where(
-            jnp.abs(denominator) > eps,
-            denominator,
-            jnp.where(denominator >= 0, eps, -eps),
-        )
-
-        dt_initial = (-g_previous * jnp.asarray(h, dtype=gi.dtype) / safe_denominator)
-
-        updated_tt = lax.cond(should_store,
-            lambda current_tt: _record_timing_no_grad(
-                current_tt,
-                s_prior,
-                occultor=occultor,
-                storage_index=storage_index,
-                dt_initial=dt_initial,
-                scheme_no_grad=scheme_no_grad,
-            ),
-            lambda current_tt: current_tt,
-            updated_tt,
-        )
-
-    return updated_tt
-
-def detect_parameter_transits_grad(s_prior, s_current,d_current,tt,*,h, scheme_grad: Callable,):
-    rstar = jnp.asarray(1.0e12, dtype=s_current.x.dtype)
-    updated_tt = tt
-
-    for occultor in tt.occs:
-        gi = g_func(tt.ti, occultor, s_current.x, s_current.v,)
-        g_previous = updated_tt.gsave[occultor]
-        ri = jnp.sqrt(jnp.sum(s_current.x[:, occultor] ** 2))
-        candidate = ((gi > 0.0) & (g_previous < 0.0)
-            & (-s_current.x[2, occultor]> 0.25 * ri)
-            & (ri < rstar))
-
-        old_count = updated_tt.count[occultor]
-        new_count = old_count + candidate.astype(updated_tt.count.dtype)
-
-        updated_tt = replace(updated_tt,
-            count=updated_tt.count.at[occultor].set(new_count),
-            gsave=updated_tt.gsave.at[occultor].set(gi),)
-
-        should_store = (candidate & (new_count <= updated_tt.ntt))
-        storage_index = jnp.maximum(new_count - 1, 0,)
-
-        denominator = gi - g_previous
-        eps = jnp.finfo(gi.dtype).eps
-
-        safe_denominator = jnp.where(
-            jnp.abs(denominator) > eps,
-            denominator,
-            jnp.where(denominator >= 0, eps, -eps),
-        )
-
-        dt_initial = (-g_previous * jnp.asarray(h, dtype=gi.dtype) / safe_denominator)
-
-        updated_tt = lax.cond(should_store,
-            lambda current_tt: _record_parameters_grad(
-                current_tt,
-                s_prior,
-                d_current,
-                occultor=occultor,
-                storage_index=storage_index,
-                dt_initial=dt_initial,
-                scheme_grad=scheme_grad,
-            ),
-            lambda current_tt: current_tt,
-            updated_tt,
-        )
-
-    return updated_tt
-
-def detect_parameter_transits_no_grad(s_prior,s_current, tt, *, h, scheme_no_grad: Callable,):
-    rstar = jnp.asarray(1.0e12, dtype=s_current.x.dtype)
-    updated_tt = tt
-
-    for occultor in tt.occs:
-        gi = g_func(tt.ti, occultor, s_current.x, s_current.v,)
-        g_previous = updated_tt.gsave[occultor]
-
-        ri = jnp.sqrt(jnp.sum(s_current.x[:, occultor] ** 2))
-
-        candidate = ((gi > 0.0) & (g_previous < 0.0)
-            & (
-                -s_current.x[2, occultor]
-                > 0.25 * ri
-            )
-            & (ri < rstar)
-        )
-
-        old_count = updated_tt.count[occultor]
-        new_count = old_count + candidate.astype(updated_tt.count.dtype)
-
-        updated_tt = replace(updated_tt,
-            count=updated_tt.count.at[occultor].set(new_count),
-            gsave=updated_tt.gsave.at[occultor].set(gi),)
-
-        should_store = (candidate & (new_count <= updated_tt.ntt))
-        storage_index = jnp.maximum(new_count - 1, 0,)
-
-        denominator = gi - g_previous
-        eps = jnp.finfo(gi.dtype).eps
-
-        safe_denominator = jnp.where(jnp.abs(denominator) > eps,
-            denominator,
-            jnp.where(denominator >= 0, eps, -eps),)
-
-        dt_initial = (-g_previous * jnp.asarray(h, dtype=gi.dtype) / safe_denominator)
-
-        updated_tt = lax.cond(should_store,
-            lambda current_tt: _record_parameters_no_grad(
-                current_tt,
-                s_prior,
-                occultor=occultor,
-                storage_index=storage_index,
-                dt_initial=dt_initial,
-                scheme_no_grad=scheme_no_grad,
-            ),
-            lambda current_tt: current_tt,
-            updated_tt,
-        )
-
-    return updated_tt

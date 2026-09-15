@@ -25,7 +25,7 @@ def check_step(t0, tmax) -> float:
     return jnp.where(jnp.abs(tmax) > jnp.abs(t0), sign_tmax, jnp.where(sign_tmax != jnp.sign(t0), sign_tmax, -sign_tmax,),)
 
 
-@partial(jax.jit, static_argnames=("scheme_no_grad", "nsteps"),)
+@partial(jax.jit, static_argnames=("scheme_no_grad",),)
 def _run_n_steps_no_grad(s: State, h: Array, *, scheme_no_grad: Callable, nsteps: int,):
     """
     s_new = scheme_no_grad(s, h)
