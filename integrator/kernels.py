@@ -41,7 +41,8 @@ def integrate_transit_output_grad(s, d, output, *, scheme_grad, h, nsteps,):
         #derivatives_prior = derivatives
 
         # Advance one complete step.
-        state, derivatives = scheme_grad(state, derivatives, h,)
+        state, derivatives = scheme_grad(state, derivatives, h,) # Here do a rough estimation
+        
         new_time = (t0 + (istep.astype(state.x.dtype) + jnp.asarray(1.0, dtype=state.x.dtype)) * h)
         state = replace_state_time(state, new_time,)
 
@@ -326,7 +327,7 @@ def record_transit_grad(*, state_anchor, derivatives_template, output, occultor,
         new_tt = output.tt.at[occultor,storage_index,].set(transit_time)
         new_dtdq0 = output.dtdq0.at[occultor,storage_index,:,:,].set(dtdq)
 
-        return replace(output,tt=new_tt,dtdq0=new_dtdq0,)
+        return replace(output, tt=new_tt,dtdq0=new_dtdq0, dtdq = dtdq)
 
     if isinstance(output, TransitParameters):
         observables, derivatives = dtbvdq(

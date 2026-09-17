@@ -66,7 +66,7 @@ class Integrator:
 
     @classmethod
     def default(cls, h: float, tmax: float, t0: float = 0.0) -> "Integrator":
-        return cls(scheme_grad=ahl21,  h=h,  tmax=tmax, t0=t0,)
+        return cls(scheme_grad=ahl21,  h=h,  tmax=tmax, t0=t0,) #Here use ahl21 integrator as default
 
     @classmethod
     def with_scheme(cls, scheme_grad: Callable, h: float, tmax: float,t0: float = 0.0,) -> "Integrator":

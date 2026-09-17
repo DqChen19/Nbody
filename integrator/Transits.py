@@ -81,10 +81,10 @@ def create_transit_timing(tmax: float, ic, ti: int = 0, ) -> TransitTiming:
         dtdq0=jnp.zeros((n, ntt, 7, n), dtype=dtype,),
         dtdelements=jnp.zeros((n, ntt, 7, n), dtype=dtype,),
         count=jnp.zeros((n,), dtype=jnp.int32,),
-        dtdq=jnp.zeros((1, 7, n), dtype=dtype,),
+        dtdq=jnp.zeros((7, n), dtype=dtype,),
         gsave=jnp.zeros((n,), dtype=dtype,),
         s_prior=base_state, s_transit=base_state,
-        ntt=ntt, ti=int(ti), occs=occs,)
+        ntt=ntt, ti=ti, occs=occs,)
 
 def zero_transit_timing(output: TransitTiming,) -> TransitTiming:
     return replace(output, tt=jnp.zeros_like(output.tt),
@@ -152,8 +152,7 @@ def create_transit_parameters(tmax: float, ic, ti: int = 0) -> TransitParameters
         count=jnp.zeros((n,), dtype=jnp.int32,),
         dtbvdq=jnp.zeros((3, 7, n), dtype=dtype,),
         gsave=jnp.zeros((n,), dtype=dtype,),
-        s_prior=base_state, s_transit=base_state,
-        ntt=ntt, ti=ti, occs=occs,)
+        s_prior=base_state, s_transit=base_state,ntt=ntt, ti=ti, occs=occs,)
 
 def zero_transit_parameters(output: TransitParameters,) -> TransitParameters:
     return replace(output,

@@ -85,7 +85,6 @@ def ahl21_no_grad(state,h,):
 # ════════════════════════════════
 # Helpful functions
 # ════════════════════════════════
-
 def compute_dqdt_no_grad(state):
     """
     Sum pairwise Newtonian accelerations over all body pairs (independent
@@ -133,11 +132,9 @@ def _safe_signed_denominator(value: Array, eps: Array,):
     replacement = jnp.where(value >= 0.0, eps, -eps)
     return jnp.where(jnp.abs(value) > eps, value, replacement,)
 
-
 def _cbrt_jax(x):
     """Real cube root supporting negative inputs."""
     return jnp.sign(x) * jnp.abs(x) ** (1.0 / 3.0)
-
 
 def _cubic1_jax(a, b, c):
     '''Return one real solution of x³ + a x² + b x + c = 0'''
@@ -174,7 +171,7 @@ def _cubic1_jax(a, b, c):
 
 def _jac_delxv_gamma_no_grad(x0: Array, v0: Array, k: Array, h: Array, *, drift_first: bool,):
     """
-    JAX-compatible translation of Julia jac_delxv_gamma!(x0, v0, k, h, drift_first; grad=false).
+    JAX-compatible translation of Julia jac_delxv_gamma!(x0, v0, k, h, drift_first).
 
     Parameters
     ----------
@@ -212,11 +209,9 @@ def _jac_delxv_gamma_no_grad(x0: Array, v0: Array, k: Array, h: Array, *, drift_
     gamma_fallback = h * r0inv * sqb
 
     def cubic_guess(_):
-        return _cubic1_jax(
-            3.0 * eta * sqb / zeta,
-            6.0 * r0 * signb * beta0 / zeta,
-            -6.0 * h * signb * beta0 * sqb / zeta,
-        )
+        return _cubic1_jax(3.0 * eta * sqb / zeta,
+                        6.0 * r0 * signb * beta0 / zeta,
+                        -6.0 * h * signb * beta0 * sqb / zeta,)
 
     def noncubic_guess(_):
         def quadratic_guess(_):
@@ -226,8 +221,7 @@ def _jac_delxv_gamma_no_grad(x0: Array, v0: Array, k: Array, h: Array, *, drift_
             return lax.cond(disc > zero,
                 lambda _: sqb * (-reta + jnp.sqrt(disc)),
                 lambda _: gamma_fallback,
-                operand=None,
-            )
+                operand=None,)
 
         return lax.cond(eta != zero, quadratic_guess, lambda _: gamma_fallback,operand=None,)
 
@@ -244,8 +238,7 @@ def _jac_delxv_gamma_no_grad(x0: Array, v0: Array, k: Array, h: Array, *, drift_
         return lax.cond(beta0 > zero,
             lambda z: (jnp.sin(z), jnp.cos(z),),
             lambda z: (jnp.sinh(z), jnp.exp(-z) + jnp.sinh(z),),
-            xx,
-        )
+            xx,)
 
     initial_carry = (gamma_guess, 2.0 * gamma_guess, 3.0 * gamma_guess, jnp.asarray(0, dtype=jnp.int32),jnp.asarray(True),)
 
@@ -272,7 +265,6 @@ def _jac_delxv_gamma_no_grad(x0: Array, v0: Array, k: Array, h: Array, *, drift_
         return (new_gamma, new_gamma1, new_gamma2, new_iteration, keep_going,)
 
     gamma, _, _, _, _ = lax.while_loop(condition, body, initial_carry,)
-
     sx, cx = sincos_half_gamma(gamma)
 
     g1bs = 2.0 * sx * cx / sqb
@@ -322,7 +314,6 @@ def kickfast(x, v, verror, h, m, pair, n: int,):
     dispatched every step), and i, j are static ints so `x[:, i]` compiles
     to a static slice instead of a dynamic gather.
     """
-    eps = jnp.finfo(x.dtype).eps
 
     for i in range(n - 1):
         for j in range(i + 1, n):
@@ -330,7 +321,7 @@ def kickfast(x, v, verror, h, m, pair, n: int,):
                 continue
 
             rij = x[:, i] - x[:, j]
-            r2 = jnp.maximum(jnp.dot(rij, rij), eps)
+            r2 = jnp.dot(rij, rij)
             r2inv = 1.0 / r2
             r3inv = r2inv * jnp.sqrt(r2inv)
             fac = h * GNEWT * r3inv * rij
@@ -346,10 +337,8 @@ def kickfast(x, v, verror, h, m, pair, n: int,):
 
 def phic(x, v, verror, h, m, pair, n: int,):
     dtype = x.dtype
-    eps = jnp.finfo(dtype).eps
 
     a = jnp.zeros_like(x)
-
     # First pass: 2h/3 kick and acceleration.
     for i in range(n - 1):
         for j in range(i + 1, n):
@@ -357,7 +346,7 @@ def phic(x, v, verror, h, m, pair, n: int,):
                 continue
 
             rij = x[:, i] - x[:, j]
-            r2 = jnp.maximum(jnp.dot(rij, rij), eps)
+            r2 = jnp.dot(rij, rij)
 
             r2inv = 1.0 / r2
             r3inv = r2inv * jnp.sqrt(r2inv)
@@ -384,7 +373,7 @@ def phic(x, v, verror, h, m, pair, n: int,):
             aij = a[:, i] - a[:, j]
             rij = x[:, i] - x[:, j]
 
-            r2 = jnp.maximum(jnp.dot(rij, rij), eps)
+            r2 = jnp.dot(rij, rij)
             r1 = jnp.sqrt(r2)
             ardot = jnp.dot(aij, rij)
 
@@ -401,7 +390,6 @@ def phic(x, v, verror, h, m, pair, n: int,):
 
 def phisalpha(x, v, verror, h, alpha, m, pair, n: int,):
     dtype = x.dtype
-    eps = jnp.finfo(dtype).eps
 
     coeff = (alpha * h**3 * GNEWT / 48.0)
     a = jnp.zeros_like(x)
@@ -413,7 +401,7 @@ def phisalpha(x, v, verror, h, alpha, m, pair, n: int,):
                 continue
 
             rij = x[:, i] - x[:, j]
-            r2 = jnp.maximum(jnp.dot(rij, rij), eps,)
+            r2 = jnp.dot(rij, rij)
 
             r3 = r2 * jnp.sqrt(r2)
             fac = GNEWT * rij / r3
@@ -429,7 +417,7 @@ def phisalpha(x, v, verror, h, alpha, m, pair, n: int,):
             aij = a[:, i] - a[:, j]
             rij = x[:, i] - x[:, j]
 
-            r2 = jnp.maximum(jnp.dot(rij, rij), eps,)
+            r2 = jnp.dot(rij, rij)
 
             r1 = jnp.sqrt(r2)
             ardot = jnp.dot(aij, rij)
@@ -447,19 +435,16 @@ def phisalpha(x, v, verror, h, alpha, m, pair, n: int,):
     return v, verror
 
 
-
 def _kepler_driftij_gamma(x, v, xerror, verror, m, i: int, j: int, h, *, drift_first: bool,):
     x0 = x[:, i] - x[:, j]
     v0 = v[:, i] - v[:, j]
 
     total_mass = m[i] + m[j]
     gm = GNEWT * total_mass
-
     eps = jnp.finfo(x.dtype).eps
 
     def apply_kepler(carry):
         x_current, v_current, xerror_current, verror_current = carry
-
         delxv = _jac_delxv_gamma_no_grad(x0, v0, gm, h, drift_first=drift_first,)
 
         mass_inverse = 1.0 / total_mass
@@ -477,17 +462,11 @@ def _kepler_driftij_gamma(x, v, xerror, verror, m, i: int, j: int, h, *, drift_f
         xerror_current = (xerror_current.at[:, i].set(xi_error).at[:, j].set(xj_error))
 
         v_current = (v_current.at[:, i].set(vi).at[:, j].set(vj))
-
         verror_current = (verror_current.at[:, i].set(vi_error).at[:, j].set(vj_error))
 
         return (x_current, v_current, xerror_current, verror_current,)
 
-    return lax.cond(
-        jnp.abs(gm) > eps,
-        apply_kepler,
-        lambda carry: carry,
-        (x, v, xerror, verror),
-    )
+    return lax.cond(jnp.abs(gm) > eps, apply_kepler, lambda carry: carry, (x, v, xerror, verror), )
 
 
 def _pair_indices(n: int):
@@ -532,8 +511,7 @@ def drift_kepler(x, v, xerror, verror, h, m, pair, n: int,):
             jnp.logical_not(pair[i, j]),
             lambda current: _kepler_driftij_gamma(*current, m, i, j, h, drift_first=True,),
             lambda current: current,
-            carry,
-        )
+            carry,)
         return new_carry, None
 
     carry, _ = lax.scan(pair_step, (x, v, xerror, verror), (ii, jj),)

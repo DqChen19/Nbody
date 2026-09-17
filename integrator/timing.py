@@ -216,8 +216,10 @@ def find_transit_grad(s_anchor, d_template,*, transited_body: int,
         new_old_1 = dt_estimate
 
         d_start = zero_derivatives(d_template)
-        s_new, d_new = scheme_grad(s_anchor, d_start, dt_estimate,)
 
+        ############
+        s_new, d_new = scheme_grad(s_anchor, d_start, dt_estimate,)
+        ############
         gsky = g_func(transited_body, occultor, s_new.x, s_new.v,)
         gdot = gd_func(transited_body, occultor, s_new.x, s_new.v, s_new.dqdt,)
 
