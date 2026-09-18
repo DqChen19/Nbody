@@ -7,10 +7,8 @@ __init___.py
 import os
 # This package integrates small-N systems (a handful of bodies) through
 # control-flow-heavy code (lax.while_loop Kepler solves nested inside a
-# lax.fori_loop over thousands of steps). There is nothing to parallelize
-# over and no work to amortize a GPU's per-kernel dispatch overhead, so a
-# GPU is dramatically slower here than CPU, not faster. Default to CPU
-# unless the caller has already requested a platform explicitly.
+# lax.fori_loop over thousands of steps). GPU is dramatically slower here than CPU. 
+# Default to CPU unless the caller has already requested a platform explicitly.
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax
