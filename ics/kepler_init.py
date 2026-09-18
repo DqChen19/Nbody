@@ -14,14 +14,11 @@ def kepler_cartesian(time, params):
     ----------
     time : scalar
         Time at which the state is evaluated.
-    params : array, shape (7,)
-        [period, t0, ecos_omega, esin_omega,
-         inclination, Omega, mass]
+    params : array, shape (7,) [period, t0, ecos_omega, esin_omega, inclination, Omega, mass]
 
     Returns
     -------
-    state : array, shape (7,)
-        [x, y, z, vx, vy, vz, mass]
+    state : array, shape (7,) [x, y, z, vx, vy, vz, mass]
     """
     period, t0, ecos_omega, esin_omega, I, Omega, mass = params
 

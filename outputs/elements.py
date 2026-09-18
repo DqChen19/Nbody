@@ -107,7 +107,6 @@ def mag_dot(x: Array, v: Array,) -> Array:
 def rdot_magnitude(R: Array, V: Array, h: Array) -> Array:
     """
     Magnitude of the radial velocity.
-
         |Rdot| = sqrt(V^2 - (h/R)^2)
     """
     argument = V * V - (h / R) ** 2
@@ -156,7 +155,6 @@ def calc_argument_of_periapsis(x: Array, R: Array, Rdot: Array, inclination: Arr
         return jnp.arctan2(sin_wpf, cos_wpf,)
 
     w_plus_f = lax.cond(inclination != zero, calculate_w_plus_f, lambda _: zero, operand=None,)
-
     sin_f = (semi_major_axis * Rdot * (1.0 - eccentricity**2) / (angular_momentum * eccentricity))
     cos_f = (semi_major_axis * (1.0 - eccentricity**2) / R - 1.0) / eccentricity
 
@@ -164,11 +162,7 @@ def calc_argument_of_periapsis(x: Array, R: Array, Rdot: Array, inclination: Arr
 
     return w_plus_f - true_anomaly
 
-def convert_to_elements(
-    x: Array,
-    v: Array,
-    gravitational_parameter: Array,
-) -> Array:
+def convert_to_elements(x: Array,v: Array,gravitational_parameter: Array,) -> Array:
     """
     Convert one relative Cartesian state to orbital elements.
 
@@ -204,7 +198,6 @@ def convert_to_elements(
 
     eccentricity_squared = (1.0 - angular_momentum**2 / (mu * semi_major_axis))
 
-    # Avoid NaN from very small negative roundoff.
     eccentricity = jnp.sqrt(jnp.maximum(eccentricity_squared, zero,))
     cosine_inclination = hz / angular_momentum
 
@@ -237,25 +230,12 @@ def convert_to_elements(
     first_term = (-sqrt_one_minus_e2 * ecos_omega/ ( mean_motion * (1.0 - esin_omega)))
 
     atan_numerator = (jnp.sqrt(1.0 - eccentricity)* (esin_omega + ecos_omega + eccentricity))
-
     atan_denominator = (jnp.sqrt(1.0 + eccentricity) * (esin_omega - ecos_omega - eccentricity))
     second_term = (-2.0 / mean_motion * jnp.arctan2( atan_numerator, atan_denominator,))
     time_of_periapsis = jnp.mod(first_term + second_term,period, )
 
-    return jnp.stack(
-        (
-            period,
-            zero,
-            ecos_omega,
-            esin_omega,
-            inclination,
-            Omega,
-            semi_major_axis,
-            eccentricity,
-            omega,
-            time_of_periapsis,
-        )
-    )
+    return jnp.stack((period, zero, ecos_omega, esin_omega, inclination,
+            Omega, semi_major_axis, eccentricity, omega, time_of_periapsis,))
 
 def convert_relative_states_to_elements(X: Array,V: Array,mu: Array,) -> Array:
     """
@@ -307,8 +287,7 @@ def get_orbital_elements(state, ic, Elements,):
         new_elements = convert_to_elements(X[:, relative_index],V[:, relative_index],mu[relative_index],)
 
         elements.append(
-            Elements(
-                m=masses[i + 1],
+            Elements(m=masses[i + 1],
                 P=new_elements[0],
                 t0=new_elements[1],
                 ecosomega=new_elements[2],
@@ -318,14 +297,11 @@ def get_orbital_elements(state, ic, Elements,):
                 a=new_elements[6],
                 e=new_elements[7],
                 omega=new_elements[8],
-                tp=new_elements[9],
-            )
-        )
+                tp=new_elements[9], ))
         if binary_offset > 0:
             binary_offset -= 2
         elif binary_offset < 0:
             i += 1
 
         i += 1
-
     return elements

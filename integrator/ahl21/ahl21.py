@@ -130,12 +130,6 @@ def ahl21(state: State, d: Derivatives, h: Array):
     return s, d
 
 def _solve_pairs_forward(pair, n: int):
-    """
-    static:
-    真正需要做 Kepler 求解的 (i, j) 对,顺序与原来的
-    `for i in range(n-1): for j in range(i+1, n): if not pair[i][j]` 完全一致。
-    pair -> s.pair —— 静态 tuple,trace 时就已知内容。
-    """
     pairs = [(i, j) for i in range(n - 1) for j in range(i + 1, n) if not pair[i][j]]
     if not pairs:
         empty = jnp.zeros((0,), dtype=jnp.int32)
@@ -214,9 +208,9 @@ def _kickfast_grad(s: State, d: Derivatives, h: Array):
     d = replace(d, jac_kick=jac_kick, dqdt_kick=dqdt_kick)
     return s, d
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ====================================
 # jac_phi/dqdt_phi
-# ─────────────────────────────────────────────────────────────────────────────
+# ====================================
 def _pack_q(x: Array, v: Array, m: Array, n: int) -> Array:
     """Pack (x, v, m) to 7n vector, as jac_step"""
     blocks = []
@@ -249,9 +243,9 @@ def _phi_combined_physics(q: Array, h: Array, alpha: Array, pair: tuple, n: int)
     v2, _ = phisalpha(x, v1, verror0, h, alpha, m, pair, n)
     return _pack_q(x, v2, m, n)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Kepler step with Jacobian for one pair (i, j) — wrapped in gm guard
-# ─────────────────────────────────────────────────────────────────────────────
+# ====================================
+# Kepler step with Jacobian for one pair (i, j) 
+# ====================================
 def _pair_update_physics(q: Array, h: Array, drift_first: bool) -> Array:
     """
     return q
