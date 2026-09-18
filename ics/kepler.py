@@ -1,8 +1,6 @@
 import jax
 import jax.numpy as jnp
-# ======================================
-# Original Julia code adapted
-# ======================================
+
 def ekepler(m, ecc):
     '''
     Input : 
