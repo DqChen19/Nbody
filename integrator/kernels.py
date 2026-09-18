@@ -48,14 +48,13 @@ def integrate_transit_output_grad(s, d, output, *, scheme_grad, h, nsteps,):
 
         # Check whether g crossed zero during this step.
         state, derivatives, transit_output = (
-            detect_transit_grad(
-                state_current=state,
-                derivatives_current=derivatives,
-                state_prior=state_prior,
-                output=transit_output,
-                h=h,
-                scheme_grad=scheme_grad,
-            ))
+            detect_transit_grad(state_current=state,
+                                derivatives_current=derivatives,
+                                state_prior=state_prior,
+                                output=transit_output,
+                                h=h,
+                                scheme_grad=scheme_grad,
+                            ))
 
         return (state, derivatives, transit_output,)
 
@@ -68,7 +67,6 @@ def integrate_transit_output_no_grad(s, output, *, scheme_no_grad, h, nsteps,):
     scheme_no_grad must have the interface:
         s_new = scheme_no_grad(s, h)
     """
-
     t0 = state_time(s)
     output = initialize_gsave_vmap(s, output,)
 
@@ -147,21 +145,18 @@ def detect_transit_no_grad(*, state_current, state_prior, output, h, scheme_no_g
             lambda current_output: current_output,
             updated_output,
         )
-        updated_output = replace(
-                    updated_output,
+        updated_output = replace(updated_output,
                     count=updated_output.count.at[occultor].set(new_count),
                     gsave=updated_output.gsave.at[occultor].set(gi),)
     
     return state_current, updated_output
 
 def record_transit_no_grad(*, state_anchor, output, occultor, storage_index, dt_initial, scheme_no_grad,):
-    state_transit, dt_transit = find_transit_no_grad(
-        state_anchor,
-        transited_body=output.ti,
-        occultor=occultor,
-        dt_initial=dt_initial,
-        scheme_no_grad=scheme_no_grad,
-    )
+    state_transit, dt_transit = find_transit_no_grad(state_anchor,
+                                                    transited_body=output.ti,
+                                                    occultor=occultor,
+                                                    dt_initial=dt_initial,
+                                                    scheme_no_grad=scheme_no_grad,)
 
     transit_time = (state_anchor.t[0] + dt_transit)
 
@@ -185,7 +180,6 @@ def detect_transit_grad( *, state_current, state_prior, derivatives_current, out
     """
     Detect and record gradient-enabled transit events occurring between
     state_prior and state_current.
-
     This function updates only the transit output. It does not replace
     the main integration state with the temporary Newton-search state.
 
@@ -196,13 +190,13 @@ def detect_transit_grad( *, state_current, state_prior, derivatives_current, out
     state_prior: State at the beginning of that step.
 
     derivatives_current: Current Derivatives PyTree. It is used as a structural template
-        by the Newton transit refinement.
+                        by the Newton transit refinement.
 
-    output: TransitTiming or TransitParameters.
+    output: TransitTiming or TransitParameters object.
 
     h: Full integration step used between state_prior and state_current.
 
-    scheme_grad: Gradient-enabled integration scheme.
+    scheme_grad: Gradient-enabled integration scheme (AHL21).
 
     Returns
     -------
@@ -219,8 +213,7 @@ def detect_transit_grad( *, state_current, state_prior, derivatives_current, out
         gi = g_func(output.ti, occultor, state_current.x, state_current.v,)
         g_previous = updated_output.gsave[occultor]
 
-        # This reproduces the Julia implementation:
-        # ri = sqrt(x^2 + y^2 + z^2)
+        # This reproduces the Julia implementation: ri = sqrt(x^2 + y^2 + z^2)
         ri = jnp.sqrt(jnp.sum(state_current.x[:, occultor] ** 2))
 
         in_front = (- state_current.x[2, occultor] > jnp.asarray(0.25, dtype=dtype) * ri)
@@ -289,38 +282,25 @@ def record_transit_grad(*, state_anchor, derivatives_template, output, occultor,
         Initial transit-time offset relative to state_prior.
 
     scheme_grad
-        Gradient-enabled one-step integration scheme:
-
-            state_new, derivatives_new = scheme_grad(
-                state,
-                derivatives,
-                h,
-            )
+        Gradient-enabled one-step integration scheme (AHL21):
+            state_new, derivatives_new = scheme_grad(state, derivatives,h,)
 
     Returns
     -------
     Updated TransitTiming or TransitParameters object.
     """
     state_transit, derivatives_transit, dt_transit = (
-        find_transit_grad(
-            state_anchor,
-            derivatives_template,
-            transited_body=output.ti,
-            occultor=occultor,
-            dt_initial=dt_initial,
-            scheme_grad=scheme_grad,
-        )
-    )
+        find_transit_grad(state_anchor,
+                            derivatives_template,
+                            transited_body=output.ti,
+                            occultor=occultor,
+                            dt_initial=dt_initial,
+                            scheme_grad=scheme_grad,))
 
     transit_time = state_anchor.t[0] + dt_transit
 
     if isinstance(output, TransitTiming):
-        _, derivatives = dtbvdq(
-            state_transit,
-            output.ti,
-            occultor,
-            include_bv=False,
-        )
+        _, derivatives = dtbvdq(state_transit, output.ti, occultor, include_bv=False,)
 
         # derivatives has shape (1, 7, n).
         dtdq = derivatives[0]
@@ -341,10 +321,9 @@ def record_transit_grad(*, state_anchor, derivatives_template, output, occultor,
         bsky2 = observables[1]
 
         # derivatives shape: (3, 7, n)
-        new_ttbv = (output.ttbv
-                        .at[0, occultor, storage_index].set(transit_time)
-                        .at[1, occultor, storage_index].set(vsky)
-                        .at[2, occultor, storage_index].set(bsky2))
+        new_ttbv = (output.ttbv.at[0, occultor, storage_index].set(transit_time)
+                                .at[1, occultor, storage_index].set(vsky)
+                                .at[2, occultor, storage_index].set(bsky2))
 
         new_dtbvdq0 = output.dtbvdq0.at[ :, occultor, storage_index, :, :,].set(derivatives)
 
