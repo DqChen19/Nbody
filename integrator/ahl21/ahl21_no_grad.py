@@ -47,13 +47,7 @@ def ahl21_no_grad(state,h,):
     pair = state.pair
     n = state.n
 
-    # drift_kepler/kepler_drift each run a lax.while_loop Kepler root-solve
-    # per pair; unrolling that in Python (like the plain-arithmetic pair
-    # functions below) multiplies real compiled code per pair and blows up
-    # compile time for larger n (e.g. TRAPPIST-1's 28 pairs). They stay
-    # scan-based, so `pair` needs to be an array there (dynamically
-    # indexable by the scan's traced loop indices) rather than the static
-    # tuple used everywhere else.
+    # drift_kepler/kepler_drift each run a lax.while_loop Kepler root-solve per pair
     pair_arr = jnp.asarray(pair, dtype=jnp.bool_)
 
     # 1. Fast kick.
@@ -91,14 +85,6 @@ def compute_dqdt_no_grad(state):
     of the `pair` hierarchy flag -- this is a plain N-body force sum used
     only for the transit-timing Newton refinement, not part of the AHL21
     step itself).
-
-    n is a Python int (static), so the pair loop is unrolled in Python at
-    trace time: with i, j as plain ints, `x[:, i]`/`.at[:, i].add(...)`
-    compile to static slices that XLA can fuse, instead of the
-    dynamic-index gather/scatter a `lax.scan` over traced indices would
-    require. For the small n (a handful of bodies) this code targets,
-    unrolling produces a far smaller, flatter compiled graph than
-    scan-based control flow.
     """
     x = state.x
     v = state.v
