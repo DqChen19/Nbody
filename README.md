@@ -10,7 +10,10 @@ with JAX pytrees and Julia's native loops with `jax.lax.scan` / `jax.lax.while_l
 This document focuses on two things: how each Python module maps back to its Julia
 counterpart, and how the package is organized internally.
 
-## 1. Module structure
+### Small tutorial/benchmark tests
+After downloading the package, move Nbody_notebook.ipynb to the root directory of the project and run the notebook to test the Nbody package using the transitTiming example.
+
+### Module structure
 
 ```
 Nbody/
@@ -44,34 +47,3 @@ Nbody/
     └── Outputs.py                #   CartesianOutput: record the trajectory at every step
 ```
 
-### Dependency flow
-
-`ics/` has no dependency on `integrator/`; it only turns an `InitialConditions` object into
-`(x, v, jac_init)` used by `State.from_ic`. `integrator/ahl21/` depends on `State.py` and
-`utils.py` only, and is where the actual physics (kick/drift/Kepler-solve sub-steps) lives.
-`integrator/kernels.py` and `integrator/timing.py` sit one layer above the AHL21 step
-functions: they call a step function generically (`scheme_no_grad(s, h)` /
-`scheme_grad(s, d, h)`) without depending on the AHL21 module directly, so any future
-integrator with the same call signature could be substituted. `Integrator_no_grad.py` /
-`Integrator_with_grad.py` are the user-facing entry points that wire a concrete scheme
-(`ahl21_no_grad` / `ahl21`) into `kernels.py`'s loop drivers and expose the
-`intr(s, arg)`-style dispatch that mirrors Julia's callable `Integrator` struct.
-`outputs/` is purely a consumer of `State`/`ic` and does not feed back into the integrator.
-
-### Static vs. dynamic data (JAX pytrees)
-
-Every stateful object (`State`, `Derivatives`, `TransitTiming`, `TransitParameters`,
-`TransitSnapshot`) is a frozen `dataclass` registered as a JAX pytree via
-`tree_flatten`/`tree_unflatten`. Fields are split into two groups:
-
-- **children** — JAX arrays that change every step (`x`, `v`, `t`, `jac_step`, `tt`,
-  `gsave`, ...). These are traced and can be differentiated through.
-- **aux_data** — plain Python values that are fixed for the lifetime of a run (`n`,
-  `pair`, `ntt`, `ti`, `occs`). These are baked into the compiled program as constants,
-  the same way a Julia struct's type parameters are fixed at compile time.
-
-This split is what lets `ahl21_no_grad.py` and `ahl21.py` replace Julia's `for i in 1:n,
-j in i+1:n` pairwise loops with a single `lax.scan` over a precomputed `(i, j)` index
-array: the loop *shape* (how many pairs, which pairs, in what order) is static
-`aux_data`-like information known at trace time, while only the physical quantities
-being accumulated (positions, velocities, Jacobian rows) are traced `children`.
