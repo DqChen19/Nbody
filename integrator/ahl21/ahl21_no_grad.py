@@ -155,6 +155,81 @@ def _cubic1_jax(a, b, c):
 # Kepler solver
 # ══════════════════════════════
 
+def _sincos_half_gamma(gamma, beta0):
+    """(sin, cos) of gamma/2 for bound orbits, (sinh, cosh) for unbound ones."""
+    return lax.cond(beta0 > 0.0,
+        lambda z: (jnp.sin(z), jnp.cos(z),),
+        lambda z: (jnp.sinh(z), jnp.exp(-z) + jnp.sinh(z),),
+        0.5 * gamma,)
+
+def _gamma_coefficients(k, r0, eta, beta0, h):
+    signb = jnp.sign(beta0)
+    sqb = jnp.sqrt(signb * beta0)
+    zeta = k - r0 * beta0
+    c2 = -2.0 * zeta
+    c3 = 2.0 * eta * signb * sqb
+    c4 = -sqb * h * beta0
+    return signb, zeta, c2, c3, c4
+
+def _kepler_residual(gamma, k, r0, eta, beta0, h):
+    """F(gamma) whose root _solve_gamma finds (the Newton numerator)."""
+    _, _, c2, c3, c4 = _gamma_coefficients(k, r0, eta, beta0, h)
+    sx, cx = _sincos_half_gamma(gamma, beta0)
+    return k * gamma + c2 * sx * cx + c3 * sx**2 + c4
+
+@jax.custom_jvp
+def _solve_gamma(k, r0, eta, beta0, h, gamma_guess):
+    """
+    Newton solve of the universal Kepler equation for gamma.
+
+    Differentiated by the implicit function theorem (see _solve_gamma_jvp),
+    so jax.jacfwd/jvp do not push tangents through every Newton iteration.
+    """
+    signb, zeta, c2, c3, c4 = _gamma_coefficients(k, r0, eta, beta0, h)
+    c5 = c3
+
+    initial_carry = (gamma_guess, 2.0 * gamma_guess, 3.0 * gamma_guess, jnp.asarray(0, dtype=jnp.int32),jnp.asarray(True),)
+
+    def condition(carry):
+        _, _, _, iteration, keep_going = carry
+
+        return (keep_going & (iteration < 20))
+
+    def body(carry):
+        gamma, gamma1, _, iteration, _ = carry
+
+        new_gamma2 = gamma1
+        new_gamma1 = gamma
+
+        sx, cx = _sincos_half_gamma(gamma, beta0)
+        
+        numerator = (k * gamma + c2 * sx * cx + c3 * sx**2 + c4)
+        denominator = (2.0 * signb * zeta * sx**2 + c5 * sx * cx  + r0 * beta0)
+
+        new_gamma = gamma - numerator / denominator
+        new_iteration = iteration + 1
+        keep_going = ((new_iteration < ITMAX_GAMMA) & (new_gamma != new_gamma2) & (new_gamma != new_gamma1))
+
+        return (new_gamma, new_gamma1, new_gamma2, new_iteration, keep_going,)
+
+    gamma, _, _, _, _ = lax.while_loop(condition, body, initial_carry,)
+    return gamma
+
+@_solve_gamma.defjvp
+def _solve_gamma_jvp(primals, tangents):
+    """
+    F(gamma(p), p) = 0  =>  dgamma = -(dF/dp . dp) / (dF/dgamma).
+    The initial guess does not affect the converged root, so its tangent is ignored.
+    """
+    k, r0, eta, beta0, h, gamma_guess = primals
+    gamma = _solve_gamma(*primals)
+
+    _, dF_dp = jax.jvp(lambda *p: _kepler_residual(gamma, *p), (k, r0, eta, beta0, h), tangents[:5],)
+    _, dF_dgamma = jax.jvp(lambda g: _kepler_residual(g, k, r0, eta, beta0, h), (gamma,), (jnp.ones_like(gamma),),)
+
+    return gamma, -dF_dp / dF_dgamma
+
+
 def _jac_delxv_gamma_no_grad(x0: Array, v0: Array, k: Array, h: Array, *, drift_first: bool,):
     """
     JAX-compatible translation of Julia jac_delxv_gamma!(x0, v0, k, h, drift_first).
@@ -213,45 +288,8 @@ def _jac_delxv_gamma_no_grad(x0: Array, v0: Array, k: Array, h: Array, *, drift_
 
     gamma_guess = lax.cond(zeta != zero, cubic_guess, noncubic_guess, operand=None,)
 
-    c2 = -2.0 * zeta
-    c3 = 2.0 * eta * signb * sqb
-    c4 = -sqb * h * beta0
-    c5 = 2.0 * eta * signb * sqb
-
-    def sincos_half_gamma(gamma):
-        xx = 0.5 * gamma
-
-        return lax.cond(beta0 > zero,
-            lambda z: (jnp.sin(z), jnp.cos(z),),
-            lambda z: (jnp.sinh(z), jnp.exp(-z) + jnp.sinh(z),),
-            xx,)
-
-    initial_carry = (gamma_guess, 2.0 * gamma_guess, 3.0 * gamma_guess, jnp.asarray(0, dtype=jnp.int32),jnp.asarray(True),)
-
-    def condition(carry):
-        _, _, _, iteration, keep_going = carry
-
-        return (keep_going & (iteration < 20))
-
-    def body(carry):
-        gamma, gamma1, _, iteration, _ = carry
-
-        new_gamma2 = gamma1
-        new_gamma1 = gamma
-
-        sx, cx = sincos_half_gamma(gamma)
-        
-        numerator = (k * gamma + c2 * sx * cx + c3 * sx**2 + c4)
-        denominator = (2.0 * signb * zeta * sx**2 + c5 * sx * cx  + r0 * beta0)
-
-        new_gamma = gamma - numerator / denominator
-        new_iteration = iteration + 1
-        keep_going = ((new_iteration < ITMAX_GAMMA) & (new_gamma != new_gamma2) & (new_gamma != new_gamma1))
-
-        return (new_gamma, new_gamma1, new_gamma2, new_iteration, keep_going,)
-
-    gamma, _, _, _, _ = lax.while_loop(condition, body, initial_carry,)
-    sx, cx = sincos_half_gamma(gamma)
+    gamma = _solve_gamma(k, r0, eta, beta0, h, gamma_guess)
+    sx, cx = _sincos_half_gamma(gamma, beta0)
 
     g1bs = 2.0 * sx * cx / sqb
     g2bs = 2.0 * signb * sx**2 * beta0inv

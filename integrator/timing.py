@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from jax import lax
 
 from dataclasses import replace
-from typing import Callable
+from typing import Callable, Optional
 
 from .snapshot import g_func, gd_func
 
@@ -166,7 +166,8 @@ def zero_derivatives(d):
     return jax.tree_util.tree_map(jnp.zeros_like, d,)
 
 def find_transit_grad(s_anchor, d_template,*, transited_body: int, 
-                      occultor: int, dt_initial, scheme_grad: Callable,):
+                      occultor: int, dt_initial, scheme_grad: Callable,
+                      scheme_no_grad: Optional[Callable] = None,):
     """
     Refine the transit-time offset using Newton iteration.
 
@@ -180,6 +181,12 @@ def find_transit_grad(s_anchor, d_template,*, transited_body: int,
     scheme_grad
         One-step gradient scheme:
             s_new, d_new = scheme_grad(s, d, h)
+    scheme_no_grad
+        Optional derivative-free scheme, s_new = scheme_no_grad(s, h).
+        The Newton iterations only need g and dg/dt, so when this is given
+        they use it, and the (much more expensive) gradient scheme runs
+        only once, at the converged offset. If None, every iteration uses
+        scheme_grad.
 
     Returns
     -------
@@ -197,28 +204,27 @@ def find_transit_grad(s_anchor, d_template,*, transited_body: int,
     previous_2 = dt0 + jnp.asarray(2.0, dtype=dtype)
 
     iteration = jnp.asarray(0, dtype=jnp.int32)
-    d_zero = zero_derivatives(d_template)
 
-    # Initial placeholder. It will be overwritten in the first iteration.
-    s_trial = s_anchor
-    d_trial = d_zero
+    carry = (dt0, stmp, previous_1, previous_2, iteration,)
 
-    carry = (dt0, stmp, previous_1, previous_2, iteration, s_trial, d_trial,)
+    def trial_step(dt_estimate):
+        if scheme_no_grad is not None:
+            return scheme_no_grad(s_anchor, dt_estimate,)
+        s_new, _ = scheme_grad(s_anchor, zero_derivatives(d_template), dt_estimate,)
+        return s_new
 
     def cond_fun(carry):
-        (dt_estimate, _, old_1, old_2, iteration, _, _,) = carry
+        (dt_estimate, _, old_1, old_2, iteration,) = carry
         return ((iteration < 20) & (dt_estimate != old_1) & (dt_estimate != old_2))
 
     def body_fun(carry):
-        (dt_estimate, compensation, old_1, _old_2, iteration, _s_trial, _d_trial,) = carry
+        (dt_estimate, compensation, old_1, _old_2, iteration,) = carry
 
         new_old_2 = old_1
         new_old_1 = dt_estimate
 
-        d_start = zero_derivatives(d_template)
-
         ############
-        s_new, d_new = scheme_grad(s_anchor, d_start, dt_estimate,)
+        s_new = trial_step(dt_estimate)
         ############
         gsky = g_func(transited_body, occultor, s_new.x, s_new.v,)
         gdot = gd_func(transited_body, occultor, s_new.x, s_new.v, s_new.dqdt,)
@@ -234,9 +240,9 @@ def find_transit_grad(s_anchor, d_template,*, transited_body: int,
         updated_compensation = (t - dt_estimate) - y
         updated_dt = t
         
-        return (updated_dt, updated_compensation, new_old_1, new_old_2, iteration + 1, s_new, d_new,)
+        return (updated_dt, updated_compensation, new_old_1, new_old_2, iteration + 1,)
 
-    (dt_final, _, _, _, _, _, _,) = lax.while_loop(cond_fun, body_fun, carry,)
+    (dt_final, _, _, _, _,) = lax.while_loop(cond_fun, body_fun, carry,)
 
     # Julia recomputes the state and derivatives once at the final dt.
     d_final_start = zero_derivatives(d_template)

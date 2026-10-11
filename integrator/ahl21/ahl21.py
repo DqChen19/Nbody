@@ -37,11 +37,7 @@ def ahl21(state: State, d: Derivatives, h: Array):
     # # 1. Fast kick(h/6)
     s, d = _kickfast_grad(s, d, h6)
     d = replace(d, dqdt_kick=d.dqdt_kick / jnp.asarray(6.0, dtype=dtype))
-    tmp7n = d.jac_kick @ s.dqdt
-    s = replace(s, dqdt=s.dqdt + d.dqdt_kick + tmp7n)
-    jac_copy = d.jac_kick @ s.jac_step
-    js, je = comp_sum_matrix(s.jac_step, s.jac_error, jac_copy)
-    s = replace(s, jac_step=js, jac_error=je)
+    s = _apply_kick_jacobian(s, d)
 
     # 2. drift (h/2)
     # dqdt update for drift (first occurrence, set)
@@ -63,13 +59,7 @@ def ahl21(state: State, d: Derivatives, h: Array):
     # 3. forward Kepler loop
     ii, jj = _solve_pairs_forward(s.pair, n)
 
-    def _forward_body(carry, idx):
-        i, j = idx
-        s_c, d_c = carry
-        s_c, d_c = _kepler_step(s_c, d_c, i, j, i * 7, j * 7, sevn, h2, True)
-        return (s_c, d_c), None
-
-    (s, d), _ = lax.scan(_forward_body, (s, d), (ii, jj))
+    s = _kepler_pass(s, ii, jj, h2, drift_first=True)
 
     # 4. Kick-pair correction
     q0 = _pack_q(s.x, s.v, s.m, n)   # starting state at this step
@@ -79,9 +69,9 @@ def ahl21(state: State, d: Derivatives, h: Array):
     v2, verror2 = phisalpha(s.x, v1, verror1, h, two, s.m, s.pair, n)
     s = replace(s, v=v2, verror=verror2)
     
-    full_jac = jax.jacfwd(lambda qq: _phi_combined_physics(qq, h, two, s.pair, n))(q0)
+    # One jacfwd for both d/dq and d/dh, so phic/phisalpha are traced once.
+    full_jac, dqdt_phi = jax.jacfwd(lambda qq, hh: _phi_combined_physics(qq, hh, two, s.pair, n), argnums=(0, 1))(q0, h)
     jac_phi  = full_jac - jnp.eye(sevn, dtype=s.x.dtype)
-    dqdt_phi = jax.jacfwd(lambda hh: _phi_combined_physics(q0, hh, two, s.pair, n))(h)
 
     jac_copy = jac_phi @ s.jac_step
     tmp7n    = jac_phi @ s.dqdt
@@ -93,13 +83,7 @@ def ahl21(state: State, d: Derivatives, h: Array):
     #5. backward Kepler
     ii_b, jj_b = _solve_pairs_backward(s.pair, n)
 
-    def _backward_body(carry, idx):
-        i, j = idx
-        s_c, d_c = carry
-        s_c, d_c = _kepler_step(s_c, d_c, i, j, i * 7, j * 7, sevn, h2, False)
-        return (s_c, d_c), None
-
-    (s, d), _ = lax.scan(_backward_body, (s, d), (ii_b, jj_b))
+    s = _kepler_pass(s, ii_b, jj_b, h2, drift_first=False)
 
     #6. drift_grad(h/2)
     x, xerror = comp_sum(s.x, s.xerror, h2 * s.v)
@@ -121,13 +105,27 @@ def ahl21(state: State, d: Derivatives, h: Array):
     d = replace(d, dqdt_kick=jnp.zeros(sevn, dtype=dtype))
     s, d = _kickfast_grad(s, d, h6)
     d = replace(d, dqdt_kick=d.dqdt_kick / jnp.asarray(6.0, dtype=dtype))
-    tmp7n = d.jac_kick @ s.dqdt
-    s = replace(s, dqdt=s.dqdt + d.dqdt_kick + tmp7n)
-    jac_copy = d.jac_kick @ s.jac_step
-    js, je = comp_sum_matrix(s.jac_step, s.jac_error, jac_copy)
-    s = replace(s, jac_step=js, jac_error=je)
+    s = _apply_kick_jacobian(s, d)
 
     return s, d
+
+def _apply_kick_jacobian(s: State, d: Derivatives) -> State:
+    """
+    Fold the fast-kick Jacobian into dqdt and jac_step.
+
+    pair is static: with no fast-kick pairs jac_kick is all zeros, so the two
+    (7n x 7n) matmuls are skipped. The compensated sum still runs (with a
+    zero addend) so jac_step/jac_error are bitwise unchanged from before.
+    """
+    if any(any(row) for row in s.pair):
+        tmp7n = d.jac_kick @ s.dqdt
+        jac_copy = d.jac_kick @ s.jac_step
+    else:
+        tmp7n = jnp.zeros_like(s.dqdt)
+        jac_copy = jnp.zeros_like(s.jac_step)
+    s = replace(s, dqdt=s.dqdt + d.dqdt_kick + tmp7n)
+    js, je = comp_sum_matrix(s.jac_step, s.jac_error, jac_copy)
+    return replace(s, jac_step=js, jac_error=je)
 
 def _solve_pairs_forward(pair, n: int):
     pairs = [(i, j) for i in range(n - 1) for j in range(i + 1, n) if not pair[i][j]]
@@ -246,7 +244,7 @@ def _phi_combined_physics(q: Array, h: Array, alpha: Array, pair: tuple, n: int)
 # ====================================
 # Kepler step with Jacobian for one pair (i, j) 
 # ====================================
-def _pair_update_physics(q: Array, h: Array, drift_first: bool) -> Array:
+def _pair_update_physics(q: Array, h: Array, drift_first: bool):
     """
     return q
     q = (xi, vi, mi, xj, vj, mj), dim = 14
@@ -268,67 +266,73 @@ def _pair_update_physics(q: Array, h: Array, drift_first: bool) -> Array:
     vi_new = vi + mj_frac * delxv[3:]
     vj_new = vj - mi_frac * delxv[3:]
 
-    return jnp.concatenate([xi_new, vi_new, mi[None], xj_new, vj_new, mj[None]])
+    # delxv is returned as jacfwd's aux output, so the caller reuses this
+    # primal Kepler solve instead of running it a second time.
+    return jnp.concatenate([xi_new, vi_new, mi[None], xj_new, vj_new, mj[None]]), delxv
 
-def _kepler_step(s: State, d: Derivatives, i: int, j: int, indi, indj, sevn: int, h: Array, drift_first: bool):
-    x0 = s.x[:, i] - s.x[:, j]
-    v0 = s.v[:, i] - s.v[:, j]
-    gm = GNEWT * (s.m[i] + s.m[j])
+def _kepler_step(carry, m: Array, i, j, h: Array, drift_first: bool):
+    """
+    Kepler drift for one pair (i, j), with Jacobian and dq/dt updates.
 
-    dtype = s.x.dtype
-    delxv = _jac_delxv_gamma_no_grad(x0, v0, gm, h, drift_first=drift_first)
+    carry = (x, v, xerror, verror, jac_step, jac_error, dqdt): only the
+    arrays a pair update touches, so lax.scan does not thread the whole
+    State/Derivatives through every pair.
+    """
+    x, v, xerror, verror, jac_step, jac_error, dqdt = carry
+    sevn = jac_step.shape[0]
+    indi, indj = 7 * i, 7 * j
+    dtype = x.dtype
 
-    mijinv = 1.0 / (s.m[i] + s.m[j])
-    mi = s.m[i] * mijinv
-    mj = s.m[j] * mijinv
+    # ---- jax.jacfwd to get derivatives of (q, h), delxv as aux ----
+    q = jnp.concatenate([x[:, i], v[:, i], m[i][None], x[:, j], v[:, j], m[j][None]])
+    (jac_wrt_q, jac_wrt_h), delxv = jax.jacfwd(_pair_update_physics, argnums=(0, 1), has_aux=True)(q, h, drift_first)
 
-    xi,  xei  = comp_sum(s.x[:, i], s.xerror[:, i],  mj * delxv[:3])
-    xj_, xej  = comp_sum(s.x[:, j], s.xerror[:, j], -mi * delxv[:3])
-    vi,  vei  = comp_sum(s.v[:, i], s.verror[:, i],  mj * delxv[3:])
-    vj_, vej  = comp_sum(s.v[:, j], s.verror[:, j], -mi * delxv[3:])
-    x_new  = s.x.at[:, i].set(xi ).at[:, j].set(xj_)
-    xe_new = s.xerror.at[:, i].set(xei).at[:, j].set(xej)
-    v_new  = s.v.at[:, i].set(vi ).at[:, j].set(vj_)
-    ve_new = s.verror.at[:, i].set(vei).at[:, j].set(vej)
+    mijinv = 1.0 / (m[i] + m[j])
+    mi = m[i] * mijinv
+    mj = m[j] * mijinv
 
-    # ---- jax.jacfwd to get derivatives of (q, h) ----
-    mi_row = s.m[i][None]
-    mj_row = s.m[j][None]
-    q = jnp.concatenate([s.x[:, i], s.v[:, i], mi_row, s.x[:, j], s.v[:, j], mj_row])
-
-    jac_wrt_q, jac_wrt_h = jax.jacfwd(_pair_update_physics, argnums=(0, 1))(q, h, drift_first)
+    xi,  xei  = comp_sum(x[:, i], xerror[:, i],  mj * delxv[:3])
+    xj_, xej  = comp_sum(x[:, j], xerror[:, j], -mi * delxv[:3])
+    vi,  vei  = comp_sum(v[:, i], verror[:, i],  mj * delxv[3:])
+    vj_, vej  = comp_sum(v[:, j], verror[:, j], -mi * delxv[3:])
+    x      = x.at[:, i].set(xi ).at[:, j].set(xj_)
+    xerror = xerror.at[:, i].set(xei).at[:, j].set(xej)
+    v      = v.at[:, i].set(vi ).at[:, j].set(vj_)
+    verror = verror.at[:, i].set(vei).at[:, j].set(vej)
 
     jac_ij  = jac_wrt_q - jnp.eye(14, dtype=dtype)
     dqdt_ij = jac_wrt_h
 
-    # indi = i*7, indj = j*7
     # dynamic_slice_in_dim(x, start_index=, slice_size=, axis=)
-    jac_step_i = lax.dynamic_slice_in_dim(s.jac_step,  indi, 7, axis=0)   
-    jac_step_j = lax.dynamic_slice_in_dim(s.jac_step,  indj, 7, axis=0)
-    jac_err_i  = lax.dynamic_slice_in_dim(s.jac_error, indi, 7, axis=0)
-    jac_err_j  = lax.dynamic_slice_in_dim(s.jac_error, indj, 7, axis=0)
-    dqdt_i     = lax.dynamic_slice_in_dim(s.dqdt,      indi, 7, axis=0)
-    dqdt_j     = lax.dynamic_slice_in_dim(s.dqdt,      indj, 7, axis=0)
-
-    jac_tmp1  = d.jac_tmp1.at[0:7, :sevn].set(jac_step_i).at[7:14, :sevn].set(jac_step_j)
-    jac_err1  = d.jac_err1.at[0:7, :sevn].set(jac_err_i ).at[7:14, :sevn].set(jac_err_j)
-    dqdt_tmp1 = d.dqdt_tmp1.at[0:7].set(dqdt_i).at[7:14].set(dqdt_j)
+    jac_tmp1 = jnp.concatenate([lax.dynamic_slice_in_dim(jac_step,  indi, 7, axis=0),
+                                lax.dynamic_slice_in_dim(jac_step,  indj, 7, axis=0)])
+    jac_err1 = jnp.concatenate([lax.dynamic_slice_in_dim(jac_error, indi, 7, axis=0),
+                                lax.dynamic_slice_in_dim(jac_error, indj, 7, axis=0)])
+    dqdt_tmp1 = jnp.concatenate([lax.dynamic_slice_in_dim(dqdt, indi, 7, axis=0),
+                                 lax.dynamic_slice_in_dim(dqdt, indj, 7, axis=0)])
 
     jac_tmp2 = jac_ij @ jac_tmp1
     jac_tmp1, jac_err1 = comp_sum_matrix(jac_tmp1, jac_err1, jac_tmp2)
     dqdt_ij_new = dqdt_ij * 0.5 + dqdt_tmp1 + jac_ij @ dqdt_tmp1
 
-    jac_step  = lax.dynamic_update_slice_in_dim(s.jac_step,  jac_tmp1[0:7,  :sevn], indi, axis=0)
-    jac_step  = lax.dynamic_update_slice_in_dim(jac_step,    jac_tmp1[7:14, :sevn], indj, axis=0)
-    jac_error = lax.dynamic_update_slice_in_dim(s.jac_error, jac_err1[0:7,  :sevn], indi, axis=0)
-    jac_error = lax.dynamic_update_slice_in_dim(jac_error,   jac_err1[7:14, :sevn], indj, axis=0)
-    dqdt      = lax.dynamic_update_slice_in_dim(s.dqdt,      dqdt_ij_new[0:7],      indi, axis=0)
-    dqdt      = lax.dynamic_update_slice_in_dim(dqdt,        dqdt_ij_new[7:14],     indj, axis=0)
+    jac_step  = lax.dynamic_update_slice_in_dim(jac_step,  jac_tmp1[0:7,  :sevn], indi, axis=0)
+    jac_step  = lax.dynamic_update_slice_in_dim(jac_step,  jac_tmp1[7:14, :sevn], indj, axis=0)
+    jac_error = lax.dynamic_update_slice_in_dim(jac_error, jac_err1[0:7,  :sevn], indi, axis=0)
+    jac_error = lax.dynamic_update_slice_in_dim(jac_error, jac_err1[7:14, :sevn], indj, axis=0)
+    dqdt      = lax.dynamic_update_slice_in_dim(dqdt,      dqdt_ij_new[0:7],      indi, axis=0)
+    dqdt      = lax.dynamic_update_slice_in_dim(dqdt,      dqdt_ij_new[7:14],     indj, axis=0)
 
-    s_out = replace(s, x=x_new, xerror=xe_new, v=v_new, verror=ve_new,
-                    jac_step=jac_step, jac_error=jac_error, dqdt=dqdt)
-    d_out = replace(d, jac_ij=jac_ij, dqdt_ij=dqdt_ij_new,
-                    jac_tmp1=jac_tmp1, jac_err1=jac_err1, dqdt_tmp1=dqdt_tmp1)
+    return (x, v, xerror, verror, jac_step, jac_error, dqdt)
 
-    return s_out, d_out
+def _kepler_pass(s: State, ii: Array, jj: Array, h: Array, *, drift_first: bool) -> State:
+    """Apply _kepler_step to the pairs (ii[k], jj[k]) in order."""
+    m = s.m
+
+    def body(carry, idx):
+        return _kepler_step(carry, m, idx[0], idx[1], h, drift_first), None
+
+    init = (s.x, s.v, s.xerror, s.verror, s.jac_step, s.jac_error, s.dqdt)
+    (x, v, xerror, verror, jac_step, jac_error, dqdt), _ = lax.scan(body, init, (ii, jj))
+    return replace(s, x=x, v=v, xerror=xerror, verror=verror,
+                   jac_step=jac_step, jac_error=jac_error, dqdt=dqdt)
 

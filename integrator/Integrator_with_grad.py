@@ -14,6 +14,7 @@ from .snapshot import calc_dbvdq,calc_dbvdelements
 from .kernels import integrate_transit_output_grad
 from .Transits import TransitParameters, TransitSnapshot, TransitTiming
 from .ahl21.ahl21 import ahl21
+from .ahl21.ahl21_no_grad import ahl21_no_grad
 
 NDIM    = 3
 Array = jax.Array
@@ -51,14 +52,19 @@ class Integrator:
     Parameters
     ----------
     scheme_grad: Gradient-enabled one-step scheme: s_new, d_new = scheme_grad(s, d, h)
+    scheme_no_grad: Optional matching derivative-free scheme, s_new = scheme_no_grad(s, h).
+        Used for the Newton iterations of the transit search, which do not need
+        the Jacobian. If None, those iterations use scheme_grad.
 
     h: Positive base step size.
     tmax:  Default elapsed integration duration.
     t0: Reference initial time. Retained for compatibility with Julia.
     """
 
-    def __init__(self, scheme_grad: Callable, h: float, tmax: float, t0: float = 0.0,):
+    def __init__(self, scheme_grad: Callable, h: float, tmax: float, t0: float = 0.0,
+                 scheme_no_grad: Optional[Callable] = None,):
         self.scheme_grad = scheme_grad
+        self.scheme_no_grad = scheme_no_grad
         # Keep a positive base step. Direction is chosen per call.
         self.h = abs(float(h))
         self.t0 = float(t0)
@@ -66,11 +72,12 @@ class Integrator:
 
     @classmethod
     def default(cls, h: float, tmax: float, t0: float = 0.0) -> "Integrator":
-        return cls(scheme_grad=ahl21,  h=h,  tmax=tmax, t0=t0,) #Here use ahl21 integrator as default
+        return cls(scheme_grad=ahl21,  h=h,  tmax=tmax, t0=t0, scheme_no_grad=ahl21_no_grad,) #Here use ahl21 integrator as default
 
     @classmethod
-    def with_scheme(cls, scheme_grad: Callable, h: float, tmax: float,t0: float = 0.0,) -> "Integrator":
-        return cls(scheme_grad=scheme_grad, h=h, tmax=tmax, t0=t0,)
+    def with_scheme(cls, scheme_grad: Callable, h: float, tmax: float,t0: float = 0.0,
+                    scheme_no_grad: Optional[Callable] = None,) -> "Integrator":
+        return cls(scheme_grad=scheme_grad, h=h, tmax=tmax, t0=t0, scheme_no_grad=scheme_no_grad,)
     
     def __call__(self, s: State, arg: Optional[Any] = None, derivatives: Optional[Derivatives] = None, 
                  *, return_arrays: bool = False,):
@@ -190,6 +197,12 @@ class Integrator:
 
         return s
     
+    def _no_grad_kwargs(self):
+        """Only pass scheme_no_grad when one is set (keeps the old call signature otherwise)."""
+        if self.scheme_no_grad is None:
+            return {}
+        return {"scheme_no_grad": self.scheme_no_grad}
+
     def _call_transits(self, s, output, derivatives: Optional[Derivatives] = None, *, return_arrays: bool,):
         nsteps = abs(round(self.tmax / self.h))
         direction = 1.0 if self.tmax > 0.0 else -1.0
@@ -198,7 +211,8 @@ class Integrator:
         if derivatives is None:
             derivatives = Derivatives.create(s.n)
         s, derivatives, output = integrate_transit_output_grad(s, derivatives, output,
-                                                                scheme_grad=self.scheme_grad, h=h, nsteps=nsteps,)
+                                                                scheme_grad=self.scheme_grad, h=h, nsteps=nsteps,
+                                                                **self._no_grad_kwargs(),)
         if return_arrays:
             return s, output, derivatives
 
@@ -212,7 +226,8 @@ class Integrator:
             if derivatives is None:
                 derivatives = Derivatives.create(s.n)
             s, derivatives, output = integrate_transit_output_grad(s, derivatives, output,
-                                                                    scheme_grad=self.scheme_grad, h=h, nsteps=nsteps,)
+                                                                    scheme_grad=self.scheme_grad, h=h, nsteps=nsteps,
+                                                                    **self._no_grad_kwargs(),)
             if return_arrays:
                 return s, output, derivatives
     
