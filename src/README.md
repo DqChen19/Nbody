@@ -1,18 +1,5 @@
 # Nbody (JAX port of NbodyGradient)
 
-This package is a JAX/Python re-implementation of the Julia package
-[`NbodyGradient`](https://github.com/ericagol/NbodyGradient) (local reference copy:
-`~/Desktop/NbodyGradient`). It reproduces the AHL21 symplectic integrator, transit-timing
-detection, and analytic-derivative machinery, replacing Julia's mutable in-place structs
-with JAX pytrees and Julia's native loops with `jax.lax.scan` / `jax.lax.while_loop` /
-`jax.lax.fori_loop` so the whole step can be `jax.jit`-compiled.
-
-This document focuses on two things: how each Python module maps back to its Julia
-counterpart, and how the package is organized internally.
-
-### Small tutorial/benchmark tests
-After downloading the package, move Nbody_notebook.ipynb to the root directory of the project and run the notebook to test the Nbody package using the transitTiming example.
-
 ### Module structure
 
 ```
