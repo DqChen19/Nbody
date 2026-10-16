@@ -5,6 +5,7 @@ from dataclasses import replace
 import jax
 import jax.numpy as jnp
 from jax import lax
+import numpy as np
 
 from ...utils import comp_sum, comp_sum_matrix
 from ...pre_alloc_arrays import Derivatives
@@ -69,9 +70,9 @@ def ahl21(state: State, d: Derivatives, h: Array):
     v2, verror2 = phisalpha(s.x, v1, verror1, h, two, s.m, s.pair, n)
     s = replace(s, v=v2, verror=verror2)
     
-    # One jacfwd for both d/dq and d/dh, so phic/phisalpha are traced once.
-    full_jac, dqdt_phi = jax.jacfwd(lambda qq, hh: _phi_combined_physics(qq, hh, two, s.pair, n), argnums=(0, 1))(q0, h)
-    jac_phi  = full_jac - jnp.eye(sevn, dtype=s.x.dtype)
+    # phic + phisalpha only add a kick dv(x, m, h) to v, so jac_phi is
+    # nonzero only in the velocity rows / position+mass columns.
+    jac_phi, dqdt_phi = _phi_jacobian(q0, h, two, s.pair, n)
 
     jac_copy = jac_phi @ s.jac_step
     tmp7n    = jac_phi @ s.dqdt
@@ -230,16 +231,70 @@ def _unpack_q(q: Array, n: int):
         m = m.at[i].set(q[indi + 6])
     return x, v, m
 
-def _phi_combined_physics(q: Array, h: Array, alpha: Array, pair: tuple, n: int) -> Array:
+def _phi_kick(x: Array, m: Array, h: Array, alpha, pair: tuple, n: int) -> Array:
     """
-    phic() then phisalpha()
-    For jax.jacfwd
+    Velocity kick dv of phic() followed by phisalpha(), vectorized over all
+    pairs and without compensated summation. Used only for the derivatives
+    in _phi_jacobian (the derivative of a compensated sum is the plain sum);
+    the state itself is still advanced by phic/phisalpha.
+
+    phisalpha reads only x, and phic's second pass only the first pass's
+    accelerations, so the kick does not depend on v.
     """
-    x, v, m = _unpack_q(q, n)
-    verror0 = jnp.zeros_like(v)
-    v1, _ = phic(x, v, verror0, h, m, pair, n)
-    v2, _ = phisalpha(x, v1, verror0, h, alpha, m, pair, n)
-    return _pack_q(x, v2, m, n)
+    upper = np.triu(np.ones((n, n), dtype=bool), k=1)
+    fast = np.array(pair, dtype=bool) & upper
+    fast = fast | fast.T                     # pair[i][j] == True: phic pairs
+    kepler = (upper & ~np.array(pair, dtype=bool))
+    kepler = kepler | kepler.T               # pair[i][j] == False: phisalpha pairs
+
+    rij = x[:, :, None] - x[:, None, :]      # rij[:, i, j] = x_i - x_j
+    any_pair = jnp.asarray(fast | kepler)
+    r2 = jnp.where(any_pair, jnp.sum(rij * rij, axis=0), 1.0)
+    r1 = jnp.sqrt(r2)
+    r3inv = 1.0 / (r2 * r1)
+
+    def accel(mask):
+        # a_i = -sum_j G m_j r_ij / r_ij^3 over the masked pairs.
+        w = jnp.where(jnp.asarray(mask), m[None, :] * r3inv, 0.0)
+        return -GNEWT * jnp.einsum("kij,ij->ki", rij, w)
+
+    def pair_sum(mask, fac):
+        # dv_i = sum_j m_j fac_ij over the masked pairs (fac_ij is antisymmetric).
+        w = jnp.where(jnp.asarray(mask), m[None, :], 0.0)
+        return jnp.einsum("kij,ij->ki", fac, w)
+
+    def correction(a, coeff, extra):
+        aij = a[:, :, None] - a[:, None, :]
+        ardot = jnp.sum(aij * rij, axis=0)
+        fac1 = coeff / (r2 * r2 * r1)
+        return fac1 * (rij * (extra + 3.0 * ardot) - r2 * aij)
+
+    dv = jnp.zeros_like(x)
+    if fast.any():
+        a_fast = accel(fast)
+        dv = dv + (2.0 * h / 3.0) * a_fast
+        dv = dv + pair_sum(fast, correction(a_fast, h**3 * GNEWT / 36.0, 0.0))
+    if kepler.any():
+        a_kep = accel(kepler)
+        extra = 2.0 * GNEWT * (m[:, None] + m[None, :]) / r1
+        dv = dv + pair_sum(kepler, correction(a_kep, alpha * h**3 * GNEWT / 48.0, extra))
+    return dv
+
+def _phi_jacobian(q: Array, h: Array, alpha, pair: tuple, n: int):
+    """
+    jac_phi = d(phisalpha o phic)(q)/dq - I and dqdt_phi = d/dh, in the
+    (7n,) [x, v, m]-per-body layout. Only the velocity rows of
+    jac_phi are nonzero, in the position and mass columns.
+    """
+    x, _, m = _unpack_q(q, n)
+    dtype = q.dtype
+    jx, jm, jh = jax.jacfwd(lambda xx, mm, hh: _phi_kick(xx, mm, hh, alpha, pair, n), argnums=(0, 1, 2))(x, m, h)
+    # jx: (3, n, 3, n) = d dv[k, i] / d x[l, j];  jm: (3, n, n);  jh: (3, n)
+    jac = jnp.zeros((n, 7, n, 7), dtype=dtype)
+    jac = jac.at[:, 3:6, :, 0:3].set(jnp.transpose(jx, (1, 0, 3, 2)))
+    jac = jac.at[:, 3:6, :, 6].set(jnp.transpose(jm, (1, 0, 2)))
+    dqdt = jnp.zeros((n, 7), dtype=dtype).at[:, 3:6].set(jh.T)
+    return jac.reshape(7 * n, 7 * n), dqdt.reshape(7 * n)
 
 # ====================================
 # Kepler step with Jacobian for one pair (i, j) 
@@ -270,6 +325,55 @@ def _pair_update_physics(q: Array, h: Array, drift_first: bool):
     # primal Kepler solve instead of running it a second time.
     return jnp.concatenate([xi_new, vi_new, mi[None], xj_new, vj_new, mj[None]]), delxv
 
+def _kepler_delxv_jacobian(x0: Array, v0: Array, k: Array, h: Array, drift_first: bool):
+    """
+    delxv = _jac_delxv_gamma_no_grad(x0, v0, k, h) and its (6, 8) Jacobian
+    w.r.t. p = (x0, v0, k, h).
+
+    The Kepler solve depends on the pair only through these 8 numbers, so
+    forward mode carries 8 tangents through it instead of the 15 of
+    (xi, vi, mi, xj, vj, mj, h); _pair_jacobian applies the chain rule.
+    """
+    def f(p):
+        out = _jac_delxv_gamma_no_grad(p[0:3], p[3:6], p[6], p[7], drift_first=drift_first)
+        return out, out
+
+    p = jnp.concatenate([x0, v0, k[None], h[None]])
+    jac, delxv = jax.jacfwd(f, has_aux=True)(p)
+    return delxv, jac
+
+def _pair_jacobian(delxv: Array, jac_delxv: Array, mi: Array, mj: Array, mijinv: Array):
+    """
+    Chain rule from d(delxv)/d(x0, v0, k, h) to the pair update of
+    q = (xi, vi, mi, xj, vj, mj), where
+        xi' = xi + mj/M delx,  xj' = xj - mi/M delx   (same for v),
+        x0 = xi - xj,  v0 = vi - vj,  k = G (mi + mj),  M = mi + mj.
+
+    mi, mj are the mass fractions m_i/M, m_j/M. Returns (jac_ij, dqdt_ij):
+    jac_ij = d(q')/dq - I (14, 14) and dqdt_ij = d(q')/dh (14,), matching
+    jax.jacfwd of _pair_update_physics.
+    """
+    dtype = delxv.dtype
+    jxv, jk, jh = jac_delxv[:, 0:6], jac_delxv[:, 6], jac_delxv[:, 7]
+
+    # d(delxv)/dq, (6, 14)
+    jkm = GNEWT * jk[:, None]
+    ddel = jnp.concatenate([jxv, jkm, -jxv, jkm], axis=1)
+
+    # d(mj/M)/dq and d(mi/M)/dq: nonzero only in the mass columns 6 and 13
+    zero6 = jnp.zeros(6, dtype=dtype)
+    dmj = jnp.concatenate([zero6, (-mj * mijinv)[None], zero6, (mi * mijinv)[None]])
+    dmi = -dmj
+
+    drow_i =  mj * ddel + jnp.outer(delxv, dmj)
+    drow_j = -mi * ddel - jnp.outer(delxv, dmi)
+    zrow = jnp.zeros((1, 14), dtype=dtype)
+    jac_ij = jnp.concatenate([drow_i, zrow, drow_j, zrow], axis=0)
+
+    zero1 = jnp.zeros(1, dtype=dtype)
+    dqdt_ij = jnp.concatenate([mj * jh, zero1, -mi * jh, zero1])
+    return jac_ij, dqdt_ij
+
 def _kepler_step(carry, m: Array, i, j, h: Array, drift_first: bool):
     """
     Kepler drift for one pair (i, j), with Jacobian and dq/dt updates.
@@ -283,13 +387,14 @@ def _kepler_step(carry, m: Array, i, j, h: Array, drift_first: bool):
     indi, indj = 7 * i, 7 * j
     dtype = x.dtype
 
-    # ---- jax.jacfwd to get derivatives of (q, h), delxv as aux ----
-    q = jnp.concatenate([x[:, i], v[:, i], m[i][None], x[:, j], v[:, j], m[j][None]])
-    (jac_wrt_q, jac_wrt_h), delxv = jax.jacfwd(_pair_update_physics, argnums=(0, 1), has_aux=True)(q, h, drift_first)
+    # ---- Kepler solve and its Jacobian w.r.t. its 8 actual inputs ----
+    delxv, jac_delxv = _kepler_delxv_jacobian(x[:, i] - x[:, j], v[:, i] - v[:, j],
+                                              GNEWT * (m[i] + m[j]), h, drift_first)
 
     mijinv = 1.0 / (m[i] + m[j])
     mi = m[i] * mijinv
     mj = m[j] * mijinv
+    jac_ij, dqdt_ij = _pair_jacobian(delxv, jac_delxv, mi, mj, mijinv)
 
     xi,  xei  = comp_sum(x[:, i], xerror[:, i],  mj * delxv[:3])
     xj_, xej  = comp_sum(x[:, j], xerror[:, j], -mi * delxv[:3])
@@ -299,9 +404,6 @@ def _kepler_step(carry, m: Array, i, j, h: Array, drift_first: bool):
     xerror = xerror.at[:, i].set(xei).at[:, j].set(xej)
     v      = v.at[:, i].set(vi ).at[:, j].set(vj_)
     verror = verror.at[:, i].set(vei).at[:, j].set(vej)
-
-    jac_ij  = jac_wrt_q - jnp.eye(14, dtype=dtype)
-    dqdt_ij = jac_wrt_h
 
     # dynamic_slice_in_dim(x, start_index=, slice_size=, axis=)
     jac_tmp1 = jnp.concatenate([lax.dynamic_slice_in_dim(jac_step,  indi, 7, axis=0),
@@ -333,6 +435,5 @@ def _kepler_pass(s: State, ii: Array, jj: Array, h: Array, *, drift_first: bool)
 
     init = (s.x, s.v, s.xerror, s.verror, s.jac_step, s.jac_error, s.dqdt)
     (x, v, xerror, verror, jac_step, jac_error, dqdt), _ = lax.scan(body, init, (ii, jj))
-    return replace(s, x=x, v=v, xerror=xerror, verror=verror,
-                   jac_step=jac_step, jac_error=jac_error, dqdt=dqdt)
+    return replace(s, x=x, v=v, xerror=xerror, verror=verror, jac_step=jac_step, jac_error=jac_error, dqdt=dqdt)
 

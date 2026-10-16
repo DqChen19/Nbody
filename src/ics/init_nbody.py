@@ -1,3 +1,8 @@
+from functools import partial
+from types import SimpleNamespace
+
+import numpy as np
+import jax
 import jax.numpy as jnp
 from .initial_conditions import ElementsIC, CartesianIC
 from .kepler_init import kepler_init
@@ -87,10 +92,11 @@ def d_dm(ic, rkepler, rdotkepler, jac_kepler):
         for i in range(N):
             for j in range(N):
                 sm = sigma_m_init(m, i, j, epsilon)
-                if sm!= 0.0:
-                    # Differentiate A matrix wrt the mass of each body
-                    dAdm = dAdm.at[i, j, k].set((kronecker_delta(k, j) * epsilon[i, j] / sm 
-                                                    - kronecker_delta(epsilon[i,j], epsilon[i,k]) * epsilon[i,j] * m[j]/ (sm **2)))
+                # Differentiate A matrix wrt the mass of each body (entries with
+                # sm == 0 stay zero; a select so this also works under jit).
+                dAdm_ijk = (kronecker_delta(k, j) * epsilon[i, j] / sm
+                            - kronecker_delta(epsilon[i,j], epsilon[i,k]) * epsilon[i,j] * m[j]/ (sm **2))
+                dAdm = dAdm.at[i, j, k].set(jnp.where(sm != 0.0, dAdm_ijk, 0.0))
     
     dAinvdm = jnp.zeros((N, N, N), dtype = dtype)
 
@@ -136,6 +142,18 @@ def init_nbody(ic):
         raise TypeError('Not support this type!!')
     
 def _init_nbody_elements(ic):
+    # kepcalc/d_dm loop over the hierarchy in Python; run eagerly that is
+    # thousands of separate op dispatches (~0.5 s per call with der=True).
+    # The hierarchy matrix fixes the loop structure, so pass it as static
+    # data and compile the whole conversion once per hierarchy.
+    epsilon_key = tuple(map(tuple, np.asarray(ic.epsilon).tolist()))
+    return _init_nbody_elements_jit(jnp.asarray(ic.t0), jnp.asarray(ic.elements), jnp.asarray(ic.m),
+                                    jnp.asarray(ic.amat), epsilon_key=epsilon_key, der=bool(ic.der), nbody=int(ic.nbody),)
+
+@partial(jax.jit, static_argnames=("epsilon_key", "der", "nbody"))
+def _init_nbody_elements_jit(t0, elements, m, amat, *, epsilon_key, der, nbody):
+    ic = SimpleNamespace(t0=t0, elements=elements, m=m, amat=amat, epsilon=np.asarray(epsilon_key),
+                         der=der, nbody=nbody,)
     rkepler, rdotkepler, jac_init = kepcalc(ic)
     Ainv = jnp.linalg.inv(ic.amat)
 

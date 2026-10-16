@@ -47,21 +47,18 @@ def ahl21_no_grad(state,h,):
     pair = state.pair
     n = state.n
 
-    # drift_kepler/kepler_drift each run a lax.while_loop Kepler root-solve per pair
-    pair_arr = jnp.asarray(pair, dtype=jnp.bool_)
-
     # 1. Fast kick.
     v, verror = kickfast(x,v,verror,h6,m,pair,n,)
     # 2. Half drift.
     x, xerror = drift(x,v,xerror,h2,)
     # 3. Drift + Kepler.
-    x, v, xerror, verror = drift_kepler(x,v,xerror,verror,h2,m,pair_arr,n,)
+    x, v, xerror, verror = drift_kepler(x,v,xerror,verror,h2,m,pair,n,)
     # 4. Kick-pair correction.
     v, verror = phic(x,v,verror,h,m,pair,n,)
     # 5. Fourth-order Kepler-pair correction.
     v, verror = phisalpha(x,v,verror,h,jnp.asarray(2.0, dtype=x.dtype),m,pair,n,)
     # 6. Kepler + drift in reverse pair order.
-    x, v, xerror, verror = kepler_drift(x, v, xerror, verror, h2, m, pair_arr, n,)
+    x, v, xerror, verror = kepler_drift(x, v, xerror, verror, h2, m, pair, n,)
     # 7. Half drift.
     x, xerror = drift(x, v, xerror, h2,)
     # 8. Final fast kick.
@@ -493,70 +490,54 @@ def _kepler_driftij_gamma(x, v, xerror, verror, m, i: int, j: int, h, *, drift_f
     return lax.cond(jnp.abs(gm) > eps, apply_kepler, lambda carry: carry, (x, v, xerror, verror), )
 
 
-def _pair_indices(n: int):
+def _kepler_pair_indices(pair, n: int, *, reverse: bool):
     """
-    Static (i, j) index pairs with i < j, in the same order as
-    `for i in range(n - 1): for j in range(i + 1, n):`.
+    Static (i, j) index arrays of the Kepler pairs (pair[i][j] == False), in
+    the order `for i in range(n - 1): for j in range(i + 1, n):`, or in
+    reverse order (`for i in range(n - 2, -1, -1): for j in range(n - 1, i, -1):`)
+    for `kepler_drift`.
 
-    n is a Python int (static), so this is computed once at trace time.
-    Consumed by `lax.scan` so that the Kepler-solve pairs (which each run
-    a `lax.while_loop` root-find) compile to a single shared loop body
-    regardless of how many bodies/pairs there are, instead of one
-    physically unrolled copy of the solver per pair -- unrolling here is
-    what made compilation blow up for systems like TRAPPIST-1 (28 pairs).
+    `pair` is static (see State.pair), so fast-kick pairs are filtered out at
+    trace time instead of being skipped with a per-pair lax.cond at run time.
     """
-    ii, jj = np.triu_indices(n, k=1)
-    return jnp.asarray(ii, dtype=jnp.int32), jnp.asarray(jj, dtype=jnp.int32)
-
-
-def _pair_indices_reverse(n: int):
-    """
-    Static (i, j) index pairs, in the same order as
-    `for i in range(n - 2, -1, -1): for j in range(n - 1, i, -1):`
-    (used by `kepler_drift`, which walks pairs in reverse order).
-    """
-    pairs = [(i, j) for i in range(n - 2, -1, -1) for j in range(n - 1, i, -1)]
+    pairs = [(i, j) for i in range(n - 1) for j in range(i + 1, n) if not pair[i][j]]
+    if reverse:
+        pairs = pairs[::-1]
 
     if not pairs:
-        empty = jnp.zeros((0,), dtype=jnp.int32)
-        return empty, empty
+        return None
 
     ii, jj = zip(*pairs)
     return jnp.asarray(ii, dtype=jnp.int32), jnp.asarray(jj, dtype=jnp.int32)
 
 
-def drift_kepler(x, v, xerror, verror, h, m, pair, n: int,):
-    """`pair` must be a JAX bool array here (dynamically indexed by scan)."""
-    ii, jj = _pair_indices(n)
+def _kepler_pass(x, v, xerror, verror, h, m, pair, n: int, *, drift_first: bool, reverse: bool,):
+    """
+    Apply the pairwise Kepler drift to every Kepler pair, sequentially.
+
+    The pairs go through a lax.scan so the Kepler solver (a lax.while_loop)
+    is compiled once and shared by all pairs, instead of one physically
+    unrolled copy per pair -- unrolling is what made compilation blow up
+    for systems like TRAPPIST-1 (28 pairs).
+    """
+    indices = _kepler_pair_indices(pair, n, reverse=reverse)
+    if indices is None:
+        return x, v, xerror, verror
 
     def pair_step(carry, idx):
         i, j = idx
-        new_carry = lax.cond(
-            jnp.logical_not(pair[i, j]),
-            lambda current: _kepler_driftij_gamma(*current, m, i, j, h, drift_first=True,),
-            lambda current: current,
-            carry,)
-        return new_carry, None
+        return _kepler_driftij_gamma(*carry, m, i, j, h, drift_first=drift_first,), None
 
-    carry, _ = lax.scan(pair_step, (x, v, xerror, verror), (ii, jj),)
+    carry, _ = lax.scan(pair_step, (x, v, xerror, verror), indices,)
 
     return carry
+
+
+def drift_kepler(x, v, xerror, verror, h, m, pair, n: int,):
+    """`pair` is the static nested-tuple hierarchy flag (State.pair)."""
+    return _kepler_pass(x, v, xerror, verror, h, m, pair, n, drift_first=True, reverse=False,)
 
 
 def kepler_drift(x, v, xerror, verror, h, m, pair, n: int,):
-    """`pair` must be a JAX bool array here (dynamically indexed by scan)."""
-    ii, jj = _pair_indices_reverse(n)
-
-    def pair_step(carry, idx):
-        i, j = idx
-        new_carry = lax.cond(
-            jnp.logical_not(pair[i, j]),
-            lambda current: _kepler_driftij_gamma(*current, m, i, j, h, drift_first=False,),
-            lambda current: current,
-            carry,
-        )
-        return new_carry, None
-
-    carry, _ = lax.scan(pair_step, (x, v, xerror, verror), (ii, jj),)
-
-    return carry
+    """`pair` is the static nested-tuple hierarchy flag (State.pair)."""
+    return _kepler_pass(x, v, xerror, verror, h, m, pair, n, drift_first=False, reverse=True,)
