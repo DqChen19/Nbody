@@ -140,7 +140,7 @@ def calc_dtdelements(s, tt):
     # Return to (n, ntt, 7, n).
     dtdelements = jnp.swapaxes(result_flat.reshape(n, tt.ntt, n, 7), -1,-2,)
 
-    return replace(tt,dtdelements=dtdelements,)
+    return replace(tt, dtdelements=dtdelements,)
 
 # ================================
 # Transit Parameters
