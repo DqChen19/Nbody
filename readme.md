@@ -20,4 +20,4 @@ h = 0.1
 | Package     | NbodyGradient.jl | Nbody.py | Nbody.py after compiled|
 | ----------- | ----------- | ----------- |----------- |
 | No Grad     |    0.6s     |      4.64s  | 0.24s |
-| With Grad   |    1.5s     |      10.37s |  1.66s|
+| With Grad   |    1.5s     |      9.26s |  0.98s|

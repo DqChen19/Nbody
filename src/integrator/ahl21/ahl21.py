@@ -74,8 +74,12 @@ def ahl21(state: State, d: Derivatives, h: Array):
     # nonzero only in the velocity rows / position+mass columns.
     jac_phi, dqdt_phi = _phi_jacobian(q0, h, two, s.pair, n)
 
-    jac_copy = jac_phi @ s.jac_step
-    tmp7n    = jac_phi @ s.dqdt
+    # Multiply only the nonzero (velocity rows, position+mass columns) block.
+    vel_rows = np.array([7*i + k for i in range(n) for k in range(3, 6)])
+    xm_cols  = np.array([7*i + k for i in range(n) for k in (0, 1, 2, 6)])
+    phi_blk  = jac_phi[vel_rows[:, None], xm_cols[None, :]]
+    jac_copy = jnp.zeros_like(s.jac_step).at[vel_rows].set(phi_blk @ s.jac_step[xm_cols])
+    tmp7n    = jnp.zeros_like(s.dqdt).at[vel_rows].set(phi_blk @ s.dqdt[xm_cols])
     s = replace(s, dqdt=s.dqdt + dqdt_phi + tmp7n)
     js, je = comp_sum_matrix(s.jac_step, s.jac_error, jac_copy)
     s = replace(s, jac_step=js, jac_error=je)
@@ -253,15 +257,17 @@ def _phi_kick(x: Array, m: Array, h: Array, alpha, pair: tuple, n: int) -> Array
     r1 = jnp.sqrt(r2)
     r3inv = 1.0 / (r2 * r1)
 
+    # The pair sums below are broadcast-sums rather than einsum: under jacfwd
+    # einsum becomes small batched dots, which XLA:CPU runs ~2x slower.
     def accel(mask):
         # a_i = -sum_j G m_j r_ij / r_ij^3 over the masked pairs.
         w = jnp.where(jnp.asarray(mask), m[None, :] * r3inv, 0.0)
-        return -GNEWT * jnp.einsum("kij,ij->ki", rij, w)
+        return -GNEWT * jnp.sum(rij * w[None], axis=2)
 
     def pair_sum(mask, fac):
         # dv_i = sum_j m_j fac_ij over the masked pairs (fac_ij is antisymmetric).
         w = jnp.where(jnp.asarray(mask), m[None, :], 0.0)
-        return jnp.einsum("kij,ij->ki", fac, w)
+        return jnp.sum(fac * w[None], axis=2)
 
     def correction(a, coeff, extra):
         aij = a[:, :, None] - a[:, None, :]
@@ -342,37 +348,33 @@ def _kepler_delxv_jacobian(x0: Array, v0: Array, k: Array, h: Array, drift_first
     jac, delxv = jax.jacfwd(f, has_aux=True)(p)
     return delxv, jac
 
-def _pair_jacobian(delxv: Array, jac_delxv: Array, mi: Array, mj: Array, mijinv: Array):
+def _apply_pair_jacobian(delxv: Array, jac_delxv: Array, mi: Array, mj: Array, mijinv: Array, rows: Array):
     """
-    Chain rule from d(delxv)/d(x0, v0, k, h) to the pair update of
-    q = (xi, vi, mi, xj, vj, mj), where
+    jac_ij @ rows, where jac_ij = d(q')/dq - I (14, 14) is the Jacobian of the
+    pair update of q = (xi, vi, mi, xj, vj, mj),
         xi' = xi + mj/M delx,  xj' = xj - mi/M delx   (same for v),
-        x0 = xi - xj,  v0 = vi - vj,  k = G (mi + mj),  M = mi + mj.
+        x0 = xi - xj,  v0 = vi - vj,  k = G (mi + mj),  M = mi + mj,
+    built by the chain rule from d(delxv)/d(x0, v0, k, h).
 
-    mi, mj are the mass fractions m_i/M, m_j/M. Returns (jac_ij, dqdt_ij):
-    jac_ij = d(q')/dq - I (14, 14) and dqdt_ij = d(q')/dh (14,), matching
-    jax.jacfwd of _pair_update_physics.
+    mi, mj are the mass fractions m_i/M, m_j/M; rows is (14, k). jac_ij is
+    never formed: d(delxv)/dq only sees (xi - xj, vi - vj, mi + mj) and the
+    mass fractions only the mass rows, so jac_ij @ rows is a (6, k) product
+    plus a rank-1 term. Written as broadcast-sums rather than small dots,
+    which XLA:CPU runs much slower inside the pair scan.
     """
-    dtype = delxv.dtype
-    jxv, jk, jh = jac_delxv[:, 0:6], jac_delxv[:, 6], jac_delxv[:, 7]
+    jxv, jk = jac_delxv[:, 0:6], jac_delxv[:, 6]
 
-    # d(delxv)/dq, (6, 14)
-    jkm = GNEWT * jk[:, None]
-    ddel = jnp.concatenate([jxv, jkm, -jxv, jkm], axis=1)
+    # d(delxv)/dq @ rows, with d(delxv)/dq = [jxv, G jk, -jxv, G jk]
+    drel = rows[0:6] - rows[7:13]
+    msum = rows[6] + rows[13]
+    ddel = jnp.sum(jxv[:, :, None] * drel[None, :, :], axis=1) + (GNEWT * jk)[:, None] * msum[None, :]
 
-    # d(mj/M)/dq and d(mi/M)/dq: nonzero only in the mass columns 6 and 13
-    zero6 = jnp.zeros(6, dtype=dtype)
-    dmj = jnp.concatenate([zero6, (-mj * mijinv)[None], zero6, (mi * mijinv)[None]])
-    dmi = -dmj
+    # d(mj/M)/dq @ rows = -d(mi/M)/dq @ rows (mass columns only)
+    dmj = (-mj * mijinv) * rows[6] + (mi * mijinv) * rows[13]
+    outer = delxv[:, None] * dmj[None, :]
 
-    drow_i =  mj * ddel + jnp.outer(delxv, dmj)
-    drow_j = -mi * ddel - jnp.outer(delxv, dmi)
-    zrow = jnp.zeros((1, 14), dtype=dtype)
-    jac_ij = jnp.concatenate([drow_i, zrow, drow_j, zrow], axis=0)
-
-    zero1 = jnp.zeros(1, dtype=dtype)
-    dqdt_ij = jnp.concatenate([mj * jh, zero1, -mi * jh, zero1])
-    return jac_ij, dqdt_ij
+    zrow = jnp.zeros_like(rows[0:1])
+    return jnp.concatenate([mj * ddel + outer, zrow, -mi * ddel + outer, zrow], axis=0)
 
 def _kepler_step(carry, m: Array, i, j, h: Array, drift_first: bool):
     """
@@ -394,7 +396,10 @@ def _kepler_step(carry, m: Array, i, j, h: Array, drift_first: bool):
     mijinv = 1.0 / (m[i] + m[j])
     mi = m[i] * mijinv
     mj = m[j] * mijinv
-    jac_ij, dqdt_ij = _pair_jacobian(delxv, jac_delxv, mi, mj, mijinv)
+    # d(q')/dh: only the x, v rows see h, through delxv
+    jh = jac_delxv[:, 7]
+    zero1 = jnp.zeros(1, dtype=dtype)
+    dqdt_ij = jnp.concatenate([mj * jh, zero1, -mi * jh, zero1])
 
     xi,  xei  = comp_sum(x[:, i], xerror[:, i],  mj * delxv[:3])
     xj_, xej  = comp_sum(x[:, j], xerror[:, j], -mi * delxv[:3])
@@ -413,9 +418,10 @@ def _kepler_step(carry, m: Array, i, j, h: Array, drift_first: bool):
     dqdt_tmp1 = jnp.concatenate([lax.dynamic_slice_in_dim(dqdt, indi, 7, axis=0),
                                  lax.dynamic_slice_in_dim(dqdt, indj, 7, axis=0)])
 
-    jac_tmp2 = jac_ij @ jac_tmp1
+    jac_tmp2 = _apply_pair_jacobian(delxv, jac_delxv, mi, mj, mijinv, jac_tmp1)
     jac_tmp1, jac_err1 = comp_sum_matrix(jac_tmp1, jac_err1, jac_tmp2)
-    dqdt_ij_new = dqdt_ij * 0.5 + dqdt_tmp1 + jac_ij @ dqdt_tmp1
+    dqdt_tmp2 = _apply_pair_jacobian(delxv, jac_delxv, mi, mj, mijinv, dqdt_tmp1[:, None])[:, 0]
+    dqdt_ij_new = dqdt_ij * 0.5 + dqdt_tmp1 + dqdt_tmp2
 
     jac_step  = lax.dynamic_update_slice_in_dim(jac_step,  jac_tmp1[0:7,  :sevn], indi, axis=0)
     jac_step  = lax.dynamic_update_slice_in_dim(jac_step,  jac_tmp1[7:14, :sevn], indj, axis=0)

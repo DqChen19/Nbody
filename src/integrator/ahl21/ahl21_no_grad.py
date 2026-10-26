@@ -70,7 +70,7 @@ def ahl21_no_grad(state,h,):
     state = replace(state, x=x, v=v, xerror=xerror, verror=verror )
     dqdt = compute_dqdt_no_grad(state)
 
-    return replace(state, dqdt=dqdt)
+    return replace(state, dqdt=dqdt) #just state without derivatives
 
 
 # ════════════════════════════════
@@ -115,9 +115,6 @@ def _safe_signed_denominator(value: Array, eps: Array,):
     replacement = jnp.where(value >= 0.0, eps, -eps)
     return jnp.where(jnp.abs(value) > eps, value, replacement,)
 
-def _cbrt_jax(x):
-    """Real cube root supporting negative inputs."""
-    return jnp.sign(x) * jnp.abs(x) ** (1.0 / 3.0)
 
 def _cubic1_jax(a, b, c):
     '''Return one real solution of x³ + a x² + b x + c = 0'''
@@ -142,7 +139,7 @@ def _cubic1_jax(a, b, c):
     def one_real(_: Any) -> Array:
         discriminant = jnp.maximum(r2 - q3, 0.0)
         cubic_term = (jnp.abs(r) + jnp.sqrt(discriminant))
-        root_a = (-jnp.sign(r) * _cbrt_jax(cubic_term))
+        root_a = (-jnp.sign(r) * jnp.cbrt(cubic_term))
         root_b = jnp.where(root_a == 0.0, 0.0, q / root_a,)
         return root_a + root_b - a3
 

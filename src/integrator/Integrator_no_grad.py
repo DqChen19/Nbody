@@ -154,6 +154,12 @@ class Integrator_no_grad:
         s = replace(s, t=s.t.at[0].set(jnp.asarray(target_time,dtype=s.t.dtype)),)
         return s
     
+    def _no_grad_kwargs(self):
+            """Only pass scheme_no_grad when one is set (keeps the old call signature otherwise)."""
+            if self.scheme_no_grad is None:
+                return {}
+            return {"scheme_no_grad": self.scheme_no_grad}
+    
     def _call_transits(self, s, output,):
         nsteps = abs(round(self.tmax / self.h))
         direction = 1.0 if self.tmax > 0.0 else -1.0

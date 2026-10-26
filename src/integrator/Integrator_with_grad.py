@@ -196,7 +196,7 @@ class Integrator:
             return s, derivatives
 
         return s
-    
+
     def _no_grad_kwargs(self):
         """Only pass scheme_no_grad when one is set (keeps the old call signature otherwise)."""
         if self.scheme_no_grad is None:
