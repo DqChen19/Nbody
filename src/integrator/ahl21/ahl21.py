@@ -305,32 +305,6 @@ def _phi_jacobian(q: Array, h: Array, alpha, pair: tuple, n: int):
 # ====================================
 # Kepler step with Jacobian for one pair (i, j) 
 # ====================================
-def _pair_update_physics(q: Array, h: Array, drift_first: bool):
-    """
-    return q
-    q = (xi, vi, mi, xj, vj, mj), dim = 14
-    
-    Design for jax.jacforward
-    """
-    xi, vi, mi, xj, vj, mj = q[0:3], q[3:6], q[6], q[7:10], q[10:13], q[13]
-    x0 = xi - xj
-    v0 = vi - vj
-    gm = GNEWT * (mi + mj)
-    delxv = _jac_delxv_gamma_no_grad(x0, v0, gm, h, drift_first=drift_first)
-
-    mass_inverse = 1.0 / (mi + mj)
-    mi_frac = mi * mass_inverse
-    mj_frac = mj * mass_inverse
-
-    xi_new = xi + mj_frac * delxv[:3]
-    xj_new = xj - mi_frac * delxv[:3]
-    vi_new = vi + mj_frac * delxv[3:]
-    vj_new = vj - mi_frac * delxv[3:]
-
-    # delxv is returned as jacfwd's aux output, so the caller reuses this
-    # primal Kepler solve instead of running it a second time.
-    return jnp.concatenate([xi_new, vi_new, mi[None], xj_new, vj_new, mj[None]]), delxv
-
 def _kepler_delxv_jacobian(x0: Array, v0: Array, k: Array, h: Array, drift_first: bool):
     """
     delxv = _jac_delxv_gamma_no_grad(x0, v0, k, h) and its (6, 8) Jacobian

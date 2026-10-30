@@ -146,7 +146,7 @@ class ElementsIC(InitialConditions):
             raise ValueError("elements must have shape " + f"({nbody}, 7), got " + f"{elements_jnp.shape}")
         
         nbody = H.shape[0]
-        masses = elements[:,0]
+        masses = elements_jnp[:,0]
         A = amatrix(H, masses)  #already return A jnp matrix
         
         self.elements = elements_jnp

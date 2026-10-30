@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from functools import partial
 from typing import Any
 
 import numpy as np
@@ -108,7 +107,7 @@ def compute_dqdt_no_grad(state):
 
     return dqdt.reshape(7 * n)
 
-def _safe_signed_denominator(value: Array, eps: Array,):
+def _safe_denominator(value: Array, eps: Array,):
     """
     Replace a denominator close to zero while preserving its sign.
     """
@@ -131,7 +130,7 @@ def _cubic1_jax(a, b, c):
     q3 = q * q * q
 
     eps = jnp.finfo(dtype).eps
-    safe_b = _safe_signed_denominator(b, eps)
+    safe_b = _safe_denominator(b, eps)
 
     def three_real(_: Any) -> Array:
         return -c / safe_b
@@ -153,8 +152,7 @@ def _sincos_half_gamma(gamma, beta0):
     """(sin, cos) of gamma/2 for bound orbits, (sinh, cosh) for unbound ones."""
     return lax.cond(beta0 > 0.0,
         lambda z: (jnp.sin(z), jnp.cos(z),),
-        lambda z: (jnp.sinh(z), jnp.exp(-z) + jnp.sinh(z),),
-        0.5 * gamma,)
+        lambda z: (jnp.sinh(z), jnp.exp(-z) + jnp.sinh(z),), 0.5 * gamma,)
 
 def _gamma_coefficients(k, r0, eta, beta0, h):
     signb = jnp.sign(beta0)
@@ -165,19 +163,11 @@ def _gamma_coefficients(k, r0, eta, beta0, h):
     c4 = -sqb * h * beta0
     return signb, zeta, c2, c3, c4
 
-def _kepler_residual(gamma, k, r0, eta, beta0, h):
-    """F(gamma) whose root _solve_gamma finds (the Newton numerator)."""
-    _, _, c2, c3, c4 = _gamma_coefficients(k, r0, eta, beta0, h)
-    sx, cx = _sincos_half_gamma(gamma, beta0)
-    return k * gamma + c2 * sx * cx + c3 * sx**2 + c4
-
 @jax.custom_jvp
 def _solve_gamma(k, r0, eta, beta0, h, gamma_guess):
     """
     Newton solve of the universal Kepler equation for gamma.
 
-    Differentiated by the implicit function theorem (see _solve_gamma_jvp),
-    so jax.jacfwd/jvp do not push tangents through every Newton iteration.
     """
     signb, zeta, c2, c3, c4 = _gamma_coefficients(k, r0, eta, beta0, h)
     c5 = c3
@@ -209,19 +199,6 @@ def _solve_gamma(k, r0, eta, beta0, h, gamma_guess):
     gamma, _, _, _, _ = lax.while_loop(condition, body, initial_carry,)
     return gamma
 
-@_solve_gamma.defjvp
-def _solve_gamma_jvp(primals, tangents):
-    """
-    F(gamma(p), p) = 0  =>  dgamma = -(dF/dp . dp) / (dF/dgamma).
-    The initial guess does not affect the converged root, so its tangent is ignored.
-    """
-    k, r0, eta, beta0, h, gamma_guess = primals
-    gamma = _solve_gamma(*primals)
-
-    _, dF_dp = jax.jvp(lambda *p: _kepler_residual(gamma, *p), (k, r0, eta, beta0, h), tangents[:5],)
-    _, dF_dgamma = jax.jvp(lambda g: _kepler_residual(g, k, r0, eta, beta0, h), (gamma,), (jnp.ones_like(gamma),),)
-
-    return gamma, -dF_dp / dF_dgamma
 
 
 def _jac_delxv_gamma_no_grad(x0: Array, v0: Array, k: Array, h: Array, *, drift_first: bool,):
@@ -264,8 +241,7 @@ def _jac_delxv_gamma_no_grad(x0: Array, v0: Array, k: Array, h: Array, *, drift_
     gamma_fallback = h * r0inv * sqb
 
     def cubic_guess(_):
-        return _cubic1_jax(3.0 * eta * sqb / zeta,
-                        6.0 * r0 * signb * beta0 / zeta,
+        return _cubic1_jax(3.0 * eta * sqb / zeta,  6.0 * r0 * signb * beta0 / zeta,
                         -6.0 * h * signb * beta0 * sqb / zeta,)
 
     def noncubic_guess(_):
@@ -314,7 +290,6 @@ def _jac_delxv_gamma_no_grad(x0: Array, v0: Array, k: Array, h: Array, *, drift_
 def drift(x: Array,v: Array,xerror: Array, h: Array,) -> tuple[Array, Array]:
     """
     Drift all bodies using compensated summation.
-    Shapes
     ------
     x, v, xerror (3, n)
     """
