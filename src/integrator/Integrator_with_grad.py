@@ -205,14 +205,13 @@ class Integrator:
 
     def _call_transits(self, s, output, derivatives: Optional[Derivatives] = None, *, return_arrays: bool,):
         nsteps = abs(round(self.tmax / self.h))
-        direction = 1.0 if self.tmax > 0.0 else -1.0
+        direction = 1.0 if self.tmax > 0.0 else -1.0 #forward (+1) or backward (-1)
         h = direction * self.h
 
         if derivatives is None:
             derivatives = Derivatives.create(s.n)
         s, derivatives, output = integrate_transit_output_grad(s, derivatives, output,
-                                                                scheme_grad=self.scheme_grad, h=h, nsteps=nsteps,
-                                                                **self._no_grad_kwargs(),)
+                                                                scheme_grad=self.scheme_grad, h=h, nsteps=nsteps,)
         if return_arrays:
             return s, output, derivatives
 

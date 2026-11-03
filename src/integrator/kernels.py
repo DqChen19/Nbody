@@ -22,9 +22,16 @@ def initialize_gsave_vmap(s, output):
 # ================================
 # transit loop
 # ================================
-@partial(jax.jit,static_argnames=("scheme_grad", "scheme_no_grad",),)
-def integrate_transit_output_grad(s, d, output, *, scheme_grad, h, nsteps, scheme_no_grad=None,):
+@partial(jax.jit,static_argnames=("scheme_grad"),)
+def integrate_transit_output_grad(s, d, output, *, scheme_grad, h, nsteps):
     """
+    Input:
+        s: Current state, [xi, vi, mi] (7n,)
+
+        d: derivatives
+
+        output: transit information/structure
+
     Integrate for a fixed number of steps and detect transits.
     scheme_grad must have the interface:
 
@@ -40,22 +47,21 @@ def integrate_transit_output_grad(s, d, output, *, scheme_grad, h, nsteps, schem
         state_prior = state
         #derivatives_prior = derivatives
 
-        # Advance one complete step.
-        state, derivatives = scheme_grad(state, derivatives, h,) # Here do a rough estimation
+        # Advance one complete step. update s an d with J
+        state, derivatives = scheme_grad(state, derivatives, h,) 
         
         new_time = (t0 + (istep.astype(state.x.dtype) + jnp.asarray(1.0, dtype=state.x.dtype)) * h)
         state = replace_state_time(state, new_time,)
 
         # Check whether g crossed zero during this step.
-        state, derivatives, transit_output = (
-            detect_transit_grad(
+        # Detect if there is a potential transit
+        state, derivatives, transit_output = (detect_transit_grad(
                 state_current=state,
                 derivatives_current=derivatives,
                 state_prior=state_prior,
                 output=transit_output,
                 h=h,
                 scheme_grad=scheme_grad,
-                scheme_no_grad=scheme_no_grad,
             ))
 
         return (state, derivatives, transit_output,)
@@ -211,7 +217,7 @@ def record_transit_no_grad(*, state_anchor, output, occultor, storage_index, dt_
 
     raise TypeError("output must be TransitTiming or TransitParameters.")
 
-def detect_transit_grad( *, state_current, state_prior, derivatives_current, output, h, scheme_grad, scheme_no_grad=None,):
+def detect_transit_grad( *, state_current, state_prior, derivatives_current, output, h, scheme_grad):
     """
     Detect and record gradient-enabled transit events occurring between
     state_prior and state_current.
@@ -240,9 +246,7 @@ def detect_transit_grad( *, state_current, state_prior, derivatives_current, out
     """
     occs, gi, new_count, should_store, storage_index, dt_initial = _transit_candidates(state_current, output, h,)
 
-    updated_output = replace(output,
-                             count=output.count.at[occs].set(new_count),
-                             gsave=output.gsave.at[occs].set(gi),)
+    updated_output = replace(output, count=output.count.at[occs].set(new_count), gsave=output.gsave.at[occs].set(gi),)
 
     updated_output = _record_pending(
         updated_output, occs, should_store, storage_index, dt_initial,
@@ -254,13 +258,12 @@ def detect_transit_grad( *, state_current, state_prior, derivatives_current, out
             storage_index=index,
             dt_initial=dt0,
             scheme_grad=scheme_grad,
-            scheme_no_grad=scheme_no_grad,
         ),
     )
 
     return state_current, derivatives_current,updated_output
 
-def record_transit_grad(*, state_anchor, derivatives_template, output, occultor, storage_index, dt_initial, scheme_grad, scheme_no_grad=None,):
+def record_transit_grad(*, state_anchor, derivatives_template, output, occultor, storage_index, dt_initial, scheme_grad,):
     """
     Refine and record one detected transit with derivatives.
 
@@ -286,27 +289,19 @@ def record_transit_grad(*, state_anchor, derivatives_template, output, occultor,
     -------
     Updated TransitTiming or TransitParameters object.
     """
-    state_transit, derivatives_transit, dt_transit = (
+    state_transit, _, dt_transit = (
         find_transit_grad(
             state_anchor,
             derivatives_template,
             transited_body=output.ti,
             occultor=occultor,
             dt_initial=dt_initial,
-            scheme_grad=scheme_grad,
-            scheme_no_grad=scheme_no_grad,
-        )
-    )
+            scheme_grad=scheme_grad,))
 
     transit_time = state_anchor.t[0] + dt_transit
 
     if isinstance(output, TransitTiming):
-        _, derivatives = dtbvdq(
-            state_transit,
-            output.ti,
-            occultor,
-            include_bv=False,
-        )
+        _, derivatives = dtbvdq(state_transit, output.ti,occultor, include_bv=False,)
 
         # derivatives has shape (1, 7, n).
         dtdq = derivatives[0]
@@ -316,12 +311,7 @@ def record_transit_grad(*, state_anchor, derivatives_template, output, occultor,
         return replace(output, tt=new_tt,dtdq0=new_dtdq0, dtdq = dtdq)
 
     if isinstance(output, TransitParameters):
-        observables, derivatives = dtbvdq(
-            state_transit,
-            output.ti,
-            occultor,
-            include_bv=True,
-        )
+        observables, derivatives = dtbvdq(state_transit, output.ti, occultor, include_bv=True,)
 
         vsky = observables[0]
         bsky2 = observables[1]

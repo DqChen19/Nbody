@@ -116,8 +116,7 @@ class State:
 
         Since State is immutable, return a new State.
         """
-        return replace(
-            self, t=other.t, x=other.x, v=other.v, jac_step=other.jac_step,
+        return replace(self, t=other.t, x=other.x, v=other.v, jac_step=other.jac_step,
             xerror=other.xerror, verror=other.verror, jac_error=other.jac_error,
             dqdt=other.dqdt, dqdt_error=other.dqdt_error,)
 
@@ -127,19 +126,11 @@ class State:
         """
         x, v, jac_init = init_nbody(ic)
 
-        return replace(
-                        self,
-                        x=jnp.asarray(x, dtype=self.x.dtype),
-                        v=jnp.asarray(v, dtype=self.v.dtype),
-                        t=jnp.asarray([ic.t0], dtype=self.t.dtype),
-                        m=jnp.asarray(ic.m, dtype=self.m.dtype),
-                        jac_init=jnp.asarray(
-                            jac_init,
-                            dtype=self.jac_init.dtype,
-                        ),
-                        xerror=jnp.zeros_like(self.xerror),
-                        verror=jnp.zeros_like(self.verror),
-                    )
+        return replace(self, x=jnp.asarray(x, dtype=self.x.dtype),
+                    v=jnp.asarray(v, dtype=self.v.dtype), t=jnp.asarray([ic.t0], dtype=self.t.dtype),
+                    m=jnp.asarray(ic.m, dtype=self.m.dtype),
+                    jac_init=jnp.asarray(jac_init, dtype=self.jac_init.dtype,),
+                    xerror=jnp.zeros_like(self.xerror),verror=jnp.zeros_like(self.verror),)
     
 def dState(ic: InitialConditions):
     return State.from_ic(ic), Derivatives.create(ic.nbody)

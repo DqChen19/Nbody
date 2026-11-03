@@ -166,8 +166,7 @@ def zero_derivatives(d):
     return jax.tree_util.tree_map(jnp.zeros_like, d,)
 
 def find_transit_grad(s_anchor, d_template,*, transited_body: int, 
-                      occultor: int, dt_initial, scheme_grad: Callable,
-                      scheme_no_grad: Optional[Callable] = None,):
+                      occultor: int, dt_initial, scheme_grad: Callable,):
     """
     Refine the transit-time offset using Newton iteration.
 
@@ -208,8 +207,6 @@ def find_transit_grad(s_anchor, d_template,*, transited_body: int,
     carry = (dt0, stmp, previous_1, previous_2, iteration,)
 
     def trial_step(dt_estimate):
-        if scheme_no_grad is not None:
-            return scheme_no_grad(s_anchor, dt_estimate,)
         s_new, _ = scheme_grad(s_anchor, zero_derivatives(d_template), dt_estimate,)
         return s_new
 
