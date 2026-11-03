@@ -103,13 +103,15 @@ class TransitParameters:
     '''
     Transit times, impact parameters, sky-velocities, and derivatives.
     '''
-    #The transit times, impact parameter, and sky-velocity of each body.
+    #The transit times, impact parameter, and sky-velocity of each body. (t, b, v)
     ttbv: jax.Array
-    # Derivatives of the transit times, impact parameters, and sky-velocities 
+    # Derivatives of the transit times, impact parameters, and sky-velocities  
     # with respect to the initial Cartesian coordinates and masses.
+    # \partial(t,b,v)/\partial q0
     dtbvdq0: jax.Array 
     # Derivatives of the transit times, impact parameters, and sky-velocities 
     # with respect to the initial orbital elements and masses.
+    # \partial(t,b,v)/\partial \theta
     dtbvdelements: jax.Array
 
     # Runtime arrays
@@ -147,8 +149,8 @@ def create_transit_parameters(tmax: float, ic, ti: int = 0) -> TransitParameters
     base_state = State.from_ic(ic)
 
     return TransitParameters(ttbv=jnp.zeros((3, n, ntt), dtype=dtype,),
-        dtbvdq0=jnp.zeros((3, n, ntt, 7, n), dtype=dtype,),
-        dtbvdelements=jnp.zeros((3, n, ntt, 7, n), dtype=dtype,),
+        dtbvdq0=jnp.zeros((3, n, ntt, 7, n), dtype=dtype,), # 3 = (tt, b, v); n = n body; ntt = max ntt; 7 = (xi, vi, m); n = n body
+        dtbvdelements=jnp.zeros((3, n, ntt, 7, n), dtype=dtype,), # 3 = (tt, b, v); n = n body; ntt = max ntt; 7 = ["m", "P", "t0", "ecos_omega", "esin_omega", "I", "Omega"]; n = n body
         count=jnp.zeros((n,), dtype=jnp.int32,),
         dtbvdq=jnp.zeros((3, 7, n), dtype=dtype,),
         gsave=jnp.zeros((n,), dtype=dtype,),

@@ -127,7 +127,7 @@ def calc_dtdelements(s, tt):
     Required shapes
     ---------------
     tt.dtdq0: (n, ntt, 7, n)
-    s.jac_init: (7*n, 7*n)
+    s.jac_init: (7*n, 7*n), \partial q_0 /\partial \theta
 
     Returns
     -------
@@ -136,7 +136,9 @@ def calc_dtdelements(s, tt):
     n = s.n
     dtdq0 = tt.dtdq0 # (n, ntt, 7, n)
     dtdq_flat = (jnp.swapaxes(dtdq0, -1, -2).reshape(n, tt.ntt, 7 * n)) #(n, ntt, 7*n)
-    result_flat = jnp.einsum("...p,pq->...q", dtdq_flat,s.jac_init,) # (n, ntt, 7*n) @ (7*n, 7*n)
+    # Chain rule 
+    # dt/delements = (dt/dq0) @ (dq0/delements)
+    result_flat = jnp.einsum("...p,pq->...q", dtdq_flat,s.jac_init,) # (n, ntt, 7*n) @ (7*n, 7*n) = (n, ntt, 7*n)
     # Return to (n, ntt, 7, n).
     dtdelements = jnp.swapaxes(result_flat.reshape(n, tt.ntt, n, 7), -1,-2,)
 
