@@ -52,11 +52,12 @@ from .pre_alloc_arrays import (dTime,  Jacobian, Derivatives,)
 from .ics.initial_conditions import (Elements, ElementsIC, CartesianIC, InitialConditions,)
 from .integrator.Integrator_with_grad import (Integrator, ahl21)
 from .integrator.Integrator_no_grad import (Integrator_no_grad, ahl21_no_grad)
+from .integrator.Integrator_reverse import Integrator_reverse
 from .outputs.Outputs import (CartesianOutput,)
 from .integrator.Transits import (create_transit_parameters, create_transit_timing, create_transit_snapshot)
 from .integrator.State import State, dState
 from .ics.defaults import (available_systems, get_default_ICs,)
-from .ics.init_nbody import init_nbody
+from .ics.init_nbody import init_nbody, elements_to_xvm
 from .ics.kepler_init import kepler_init
 from .ics.setup_hierarchy import hierarchy
 from .parallel import map_parallel
@@ -65,8 +66,8 @@ from .parallel import map_parallel
 __all__ = [
     "NDIM", "YEAR", "GNEWT", "THIRD", "ALPHA0",
     "Elements", "ElementsIC", "CartesianIC", "InitialConditions",
-    "State", "dState", "init_nbody", 'kepler_init',
-    "Integrator", "dTime", "Integrator_no_grad", "Jacobian", "Derivatives",
+    "State", "dState", "init_nbody", "elements_to_xvm", 'kepler_init',
+    "Integrator", "dTime", "Integrator_no_grad", "Integrator_reverse", "Jacobian", "Derivatives",
     "CartesianOutput",
     "create_transit_timing", "create_transit_parameters", "create_transit_snapshot",
     "ahl21_no_grad", "ahl21", 

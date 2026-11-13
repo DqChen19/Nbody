@@ -14,22 +14,18 @@ from .Transits import TransitParameters, TransitTiming
 # ================================
 def initialize_gsave_vmap(s, output):
     occs = jnp.asarray(output.occs, dtype=jnp.int32,)
-    values = jax.vmap(
-        lambda i: g_func(i, output.ti, s.x, s.v,))(occs)
-
+    values = jax.vmap(lambda i: g_func(i, output.ti, s.x, s.v,))(occs)
     return replace(output, gsave=output.gsave.at[occs].set(values),)
 
 # ================================
 # transit loop
 # ================================
-@partial(jax.jit,static_argnames=("scheme_grad"),)
-def integrate_transit_output_grad(s, d, output, *, scheme_grad, h, nsteps):
+@partial(jax.jit,static_argnames=("scheme_grad", "scheme_no_grad",),)
+def integrate_transit_output_grad(s, d, output, *, scheme_grad, h, nsteps, scheme_no_grad=None,):
     """
     Input:
         s: Current state, [xi, vi, mi] (7n,)
-
         d: derivatives
-
         output: transit information/structure
 
     Integrate for a fixed number of steps and detect transits.
@@ -62,6 +58,7 @@ def integrate_transit_output_grad(s, d, output, *, scheme_grad, h, nsteps):
                 output=transit_output,
                 h=h,
                 scheme_grad=scheme_grad,
+                scheme_no_grad=scheme_no_grad,
             ))
 
         return (state, derivatives, transit_output,)
@@ -75,7 +72,6 @@ def integrate_transit_output_no_grad(s, output, *, scheme_no_grad, h, nsteps,):
     scheme_no_grad must have the interface:
         s_new = scheme_no_grad(s, h)
     """
-
     t0 = state_time(s)
     output = initialize_gsave_vmap(s, output,)
 
@@ -105,7 +101,6 @@ def state_time(s):
 
 def replace_state_time(s, new_time):
     """Return a new State with an updated time."""
-
     if s.t.ndim == 0:
         new_t = jnp.asarray(new_time,dtype=s.t.dtype,)
     else:
@@ -183,8 +178,7 @@ def detect_transit_no_grad(*, state_current, state_prior, output, h, scheme_no_g
             scheme_no_grad=scheme_no_grad,
         ),
     )
-    updated_output = replace(
-                updated_output,
+    updated_output = replace(updated_output,
                 count=updated_output.count.at[occs].set(new_count),
                 gsave=updated_output.gsave.at[occs].set(gi),)
 
@@ -217,7 +211,7 @@ def record_transit_no_grad(*, state_anchor, output, occultor, storage_index, dt_
 
     raise TypeError("output must be TransitTiming or TransitParameters.")
 
-def detect_transit_grad( *, state_current, state_prior, derivatives_current, output, h, scheme_grad):
+def detect_transit_grad( *, state_current, state_prior, derivatives_current, output, h, scheme_grad, scheme_no_grad=None,):
     """
     Detect and record gradient-enabled transit events occurring between
     state_prior and state_current.
@@ -228,16 +222,11 @@ def detect_transit_grad( *, state_current, state_prior, derivatives_current, out
     Parameters
     ----------
     state_current: State after one complete integration step.
-
     state_prior: State at the beginning of that step.
-
     derivatives_current: Current Derivatives PyTree. It is used as a structural template
         by the Newton transit refinement.
-
     output: TransitTiming or TransitParameters.
-
     h: Full integration step used between state_prior and state_current.
-
     scheme_grad: Gradient-enabled integration scheme.
 
     Returns
@@ -248,8 +237,7 @@ def detect_transit_grad( *, state_current, state_prior, derivatives_current, out
 
     updated_output = replace(output, count=output.count.at[occs].set(new_count), gsave=output.gsave.at[occs].set(gi),)
 
-    updated_output = _record_pending(
-        updated_output, occs, should_store, storage_index, dt_initial,
+    updated_output = _record_pending(updated_output, occs, should_store, storage_index, dt_initial,
         lambda current_output, occultor, index, dt0: record_transit_grad(
             state_anchor=state_current,
             derivatives_template=derivatives_current,
@@ -258,12 +246,12 @@ def detect_transit_grad( *, state_current, state_prior, derivatives_current, out
             storage_index=index,
             dt_initial=dt0,
             scheme_grad=scheme_grad,
-        ),
-    )
+            scheme_no_grad=scheme_no_grad,
+        ),)
 
     return state_current, derivatives_current,updated_output
 
-def record_transit_grad(*, state_anchor, derivatives_template, output, occultor, storage_index, dt_initial, scheme_grad,):
+def record_transit_grad(*, state_anchor, derivatives_template, output, occultor, storage_index, dt_initial, scheme_grad, scheme_no_grad=None,):
     """
     Refine and record one detected transit with derivatives.
 
@@ -296,7 +284,8 @@ def record_transit_grad(*, state_anchor, derivatives_template, output, occultor,
             transited_body=output.ti,
             occultor=occultor,
             dt_initial=dt_initial,
-            scheme_grad=scheme_grad,))
+            scheme_grad=scheme_grad,
+            scheme_no_grad=scheme_no_grad,))
 
     transit_time = state_anchor.t[0] + dt_transit
 
@@ -327,3 +316,128 @@ def record_transit_grad(*, state_anchor, derivatives_template, output, occultor,
         return replace(output, ttbv=new_ttbv, dtbvdq0=new_dtbvdq0,)
 
     raise TypeError("output must be TransitTiming or TransitParameters, not {type(output).__name__}.")
+
+# ====================================
+# Reverse-mode (adjoint) transit loop
+# ====================================
+SLOT_BATCH = 256   # transit slots per batch in the differentiable refinement (phase 2)
+
+@partial(jax.jit, static_argnames=("scheme_no_grad", "nsteps"),)
+def integrate_transit_output_reverse(s, output, *, scheme_no_grad, h, nsteps, slots=None):
+    """
+    Reverse-mode differentiable counterpart of integrate_transit_output_no_grad.
+
+    jax.grad / jax.vjp of output.tt with respect to s.x, s.v and s.m work
+    through this kernel. It records only TransitTiming.tt and count (no dtdq0).
+
+    Phase 1 (lax.scan over a static nsteps, jax.checkpoint-ed step body):
+        integrate, detect transits and Newton-refine them exactly as the no-grad
+        kernel. Each step returns its state (x, v, compensation errors) as a scan output. 
+        The backward pass stores only the small carry per step and recomputes the step.
+        
+    Phase 2 (after the loop, vmapped over all (occultor, transit) slots):
+        tt = t_step + dt_root - g(scheme(anchor, dt_root)) / gdot,
+        one differentiable Newton step from the stored anchor state. Its value
+        equals the refined root (g = 0 there); its derivative is the
+        implicit-function result -(dg/dq) / gdot, as in dtbvdq.
+
+    slots: optional (rows, epochs) int arrays, the output.tt entries that need
+        gradients (e.g. the observed transits). Phase 2 then refines only those;
+        every other transit keeps its Newton-root time with no gradient. rows are
+        output.tt row (body) indices and must be occultors. None refines every slot.
+
+    Keeping every differentiable transit computation out of the scan matters:
+    a lax.cond inside a differentiated step keeps the residuals of both branches,
+    which would cost one refinement per occultor at every step.
+    """
+    t0 = state_time(s)
+    output = initialize_gsave_vmap(s, output,)
+    occs = jnp.asarray(output.occs, dtype=jnp.int32,)
+    nocc = len(output.occs)
+    dtype = s.x.dtype
+
+    def body_fun(carry, istep):
+        x, v, xerror, verror, gsave, count = carry
+        state = scheme_no_grad(replace(s, x=x, v=v, xerror=xerror, verror=verror), h,)
+
+        new_time = (t0 + (istep.astype(dtype) + jnp.asarray(1.0, dtype=dtype)) * h)
+        state = replace_state_time(state, new_time,)
+        fixed_state = lax.stop_gradient(state)
+
+        _, gi, new_count, should_store, storage_index, dt_initial = _transit_candidates(
+            fixed_state, replace(output, gsave=gsave, count=count), h,)
+
+        def refine(k):
+            return lax.cond(should_store[k],
+                lambda _: transit_root_and_slope(fixed_state, transited_body=output.ti, occultor=occs[k],
+                                                 dt_initial=dt_initial[k], scheme_no_grad=scheme_no_grad,),
+                lambda _: (jnp.zeros((), dtype=dtype), jnp.ones((), dtype=dtype)), operand=None,)
+
+        dt_root, gdot = lax.map(refine, jnp.arange(nocc))
+
+        carry = (state.x, state.v, state.xerror, state.verror, gsave.at[occs].set(gi), count.at[occs].set(new_count),)
+        return carry, ((state.x, state.v, state.xerror, state.verror), dt_root, gdot, should_store, storage_index)
+
+    init = (s.x, s.v, s.xerror, s.verror, output.gsave, output.count,)
+    (x, v, xerror, verror, gsave, count), (anchors, dt_root, gdot, stored, index) = lax.scan(jax.checkpoint(body_fun), init, jnp.arange(nsteps),)
+
+    # (nsteps, nocc) step outputs -> (nocc, ntt) transit slots; steps without a transit are dropped.
+    occ_k = jnp.broadcast_to(jnp.arange(nocc), stored.shape)
+    cols = jnp.where(stored, index, output.ntt)
+
+    def to_slots(values, fill):
+        # Create a (nocc, output.ntt) and write the values into position [occ_k, cols]
+        return jnp.full((nocc, output.ntt), fill, dtype=values.dtype).at[occ_k, cols].set(values, mode="drop")
+
+    step_slot = to_slots(jnp.broadcast_to(jnp.arange(nsteps)[:, None], stored.shape), 0)
+    filled = to_slots(stored, False)
+    dt_slot = to_slots(dt_root, 0.0)
+    gdot_slot = to_slots(gdot, 1.0)
+
+    def slot_time(step, dt, slope, occultor):
+        anchor = replace(s, x=anchors[0][step], v=anchors[1][step], xerror=anchors[2][step], verror=anchors[3][step],)
+        s_root = scheme_no_grad(anchor, dt,)
+        gsky = g_func(output.ti, occultor, s_root.x, s_root.v,)
+        anchor_time = t0 + (step.astype(dtype) + jnp.asarray(1.0, dtype=dtype)) * h
+        return anchor_time + dt - gsky / slope
+
+    # Batched lax.map over the flattened slots, with each slot's step checkpointed: storing
+    # its residuals instead would cost ~55 KB per slot (~0.4 GB for TRAPPIST-1).
+    occ_slot = jnp.broadcast_to(occs[:, None], (nocc, output.ntt))
+    if slots is None:
+        times = lax.map(jax.checkpoint(lambda args: slot_time(*args)),
+                        (step_slot.reshape(-1), dt_slot.reshape(-1), gdot_slot.reshape(-1), occ_slot.reshape(-1)),
+                        batch_size=SLOT_BATCH,).reshape(nocc, output.ntt)
+    else:
+        # Newton-root times (no gradient) everywhere, then the differentiable step for the requested slots only
+        rows, epochs = (jnp.asarray(a, dtype=jnp.int32) for a in slots)
+        k_sel = jnp.argmax(occs[None, :] == rows[:, None], axis=1)
+        e_sel = jnp.clip(epochs, 0, output.ntt - 1)
+        root_times = t0 + (step_slot.astype(dtype) + jnp.asarray(1.0, dtype=dtype)) * h + dt_slot
+        times_sel = lax.map(jax.checkpoint(lambda args: slot_time(*args)),
+                            (step_slot[k_sel, e_sel], dt_slot[k_sel, e_sel], gdot_slot[k_sel, e_sel], occ_slot[k_sel, e_sel]),
+                            batch_size=SLOT_BATCH,)
+        times = lax.stop_gradient(root_times).at[k_sel, e_sel].set(times_sel)
+    tt = output.tt.at[occs].set(jnp.where(filled, times, output.tt[occs]))
+
+    s = replace_state_time(replace(s, x=x, v=v, xerror=xerror, verror=verror), t0 + nsteps * h,)
+    return s, replace(output, tt=tt, count=count, gsave=gsave,)
+
+def transit_root_and_slope(state_anchor, *, transited_body, occultor, dt_initial, scheme_no_grad,):
+    """
+    Newton root dt of g(scheme(state_anchor, dt)) and its slope gdot there (no gradients).
+
+    gdot must be the exact dt-derivative of g along the integrator map, since it sets
+    the transit-time derivative -(dg/dq) / gdot. gd_func with the no-grad dqdt (plain
+    Newtonian accelerations) is only accurate to the integrator error (~1e-6 relative),
+    enough for Newton to converge but not for the derivative, so gdot is a jvp in dt.
+    """
+    _, dt_root = find_transit_no_grad(state_anchor, transited_body=transited_body,
+                    occultor=occultor, dt_initial=dt_initial, scheme_no_grad=scheme_no_grad,)
+
+    def g_of_dt(dt):
+        s_trial = scheme_no_grad(state_anchor, dt,)
+        return g_func(transited_body, occultor, s_trial.x, s_trial.v,)
+
+    _, gdot = jax.jvp(g_of_dt, (dt_root,), (jnp.ones_like(dt_root),))
+    return lax.stop_gradient(dt_root), lax.stop_gradient(gdot)

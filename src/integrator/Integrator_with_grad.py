@@ -75,7 +75,7 @@ class Integrator:
         return cls(scheme_grad=ahl21,  h=h,  tmax=tmax, t0=t0, scheme_no_grad=ahl21_no_grad,) #Here use ahl21 integrator as default
 
     @classmethod
-    def with_scheme(cls, scheme_grad: Callable, h: float, tmax: float,t0: float = 0.0,
+    def with_scheme(cls, scheme_grad: Callable, h: float, tmax: float,t0: float = 0.0,  #Maybe there will be more integrator?
                     scheme_no_grad: Optional[Callable] = None,) -> "Integrator":
         return cls(scheme_grad=scheme_grad, h=h, tmax=tmax, t0=t0, scheme_no_grad=scheme_no_grad,)
     
@@ -211,7 +211,8 @@ class Integrator:
         if derivatives is None:
             derivatives = Derivatives.create(s.n)
         s, derivatives, output = integrate_transit_output_grad(s, derivatives, output,
-                                                                scheme_grad=self.scheme_grad, h=h, nsteps=nsteps,)
+                                                                scheme_grad=self.scheme_grad, h=h, nsteps=nsteps,
+                                                                **self._no_grad_kwargs(),)
         if return_arrays:
             return s, output, derivatives
 

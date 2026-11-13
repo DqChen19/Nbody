@@ -5,6 +5,20 @@ import jax
 
 ITMAX = 100
 
+def _differentiable_series(series_fun):
+    """
+    Give a lax.while_loop series (G3/H1/H2) a custom JVP so reverse mode can
+    differentiate it.
+    """
+    series = jax.custom_jvp(series_fun) #override the default automatic differentiation
+
+    @series.defjvp
+    def series_jvp(primals, tangents):
+        partials, value = jax.jacfwd(lambda *a: (series_fun(*a),) * 2, argnums=tuple(range(len(primals))), has_aux=True)(*primals)
+        return value, sum(p * t for p, t in zip(partials, tangents))
+
+    return jax.jit(series)
+
 # ================================ Compensated Sum =================================#
 @jax.jit
 def comp_sum(sum_value, sum_error, addend):
@@ -104,8 +118,7 @@ def G3(gamma, beta, sqb, gc = 0.5):
         )
     return jax.lax.cond( gamma < gc, use_series, use_closed_series, operand = None)    
 
-@jax.jit
-def G3_series(gamma, beta, sqb):
+def _g3_series(gamma, beta, sqb):
     # Computes G_3(beta,s) using a series tailored to the precision of s.
     dtype = jnp.result_type(gamma, beta, sqb)
     x2 = -jnp.sign(beta) * gamma ** 2
@@ -137,6 +150,9 @@ def G3_series(gamma, beta, sqb):
 
     return g3 * (-x2 * gamma) / (6.0 * beta * sqb)
 
+
+G3_series = _differentiable_series(_g3_series)
+
 @jax.jit
 def H1(gamma, beta, gc = 0.5) -> float:
     def use_series(_):
@@ -150,8 +166,7 @@ def H1(gamma, beta, gc = 0.5) -> float:
         )
     return jax.lax.cond(gamma < gc, use_series, use_closed_series, operand = None)    
 
-@jax.jit
-def H1_series(gamma, beta):
+def _h1_series(gamma, beta):
     # Computes H_1(beta,s) using a series tailored to the precision of s.
     dtype = jnp.result_type(gamma, beta)
     x2 = -jnp.sign(beta) * gamma ** 2
@@ -180,6 +195,9 @@ def H1_series(gamma, beta):
     _, h1, _, _, _, _ = jax.lax.while_loop(cond_fun,body_fun,init_state) #condition fn, body fn, and init value
     return h1 * x2 ** 2 / (12 * beta ** 2)
 
+
+H1_series = _differentiable_series(_h1_series)
+
 @jax.jit
 def H2(gamma, beta, sqb, gc = 0.5):
     def use_series(_):
@@ -193,8 +211,7 @@ def H2(gamma, beta, sqb, gc = 0.5):
         )
     return jax.lax.cond(gamma < gc, use_series,use_closed_series, operand = None)
 
-@jax.jit
-def H2_series(gamma, beta, sqb):
+def _h2_series(gamma, beta, sqb):
     # Computes H_2(beta,s) using a series tailored to the precision of s.
     dtype = jnp.result_type(gamma, beta, sqb)
     x2 = -jnp.sign(beta) * gamma ** 2
@@ -223,6 +240,9 @@ def H2_series(gamma, beta, sqb):
     
     _, h2, _, _, _, _ = jax.lax.while_loop(cond_fun,body_fun,init_state) #condition fn, body fn, and init value
     return h2 * (-x2) * gamma / (3 * beta * sqb)
+
+
+H2_series = _differentiable_series(_h2_series)
 
 @jax.jit
 def H3(gamma, beta, sqb, gc = 0.5):

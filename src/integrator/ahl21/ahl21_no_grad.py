@@ -7,14 +7,11 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import lax
-
-
 from ...utils import comp_sum, G3, H1, H2
 ITMAX_GAMMA  = 20
 YEAR    = 365.242
 GNEWT   = 39.4845 / (YEAR * YEAR)
 Array = jax.Array
-
 # ════════════════════════════════════
 # Main function
 # ════════════════════════════════════
@@ -26,9 +23,7 @@ def ahl21_no_grad(state,h,):
     -----------------------------
     state_new = ahl21_no_grad(state, h)
 
-    Notes
-    -----
-    This function does not update state.t. The enclosing Integrator
+    Notes: This function does not update state.t. The enclosing Integrator
     kernel owns the absolute simulation clock.
     """
     h = jnp.asarray(h,dtype=state.x.dtype,)
@@ -47,21 +42,21 @@ def ahl21_no_grad(state,h,):
     n = state.n
 
     # 1. Fast kick.
-    v, verror = kickfast(x,v,verror,h6,m,pair,n,)
+    v, verror = kickfast(x, v, verror, h6, m, pair, n,)
     # 2. Half drift.
-    x, xerror = drift(x,v,xerror,h2,)
+    x, xerror = drift(x, v, xerror, h2,)
     # 3. Drift + Kepler.
-    x, v, xerror, verror = drift_kepler(x,v,xerror,verror,h2,m,pair,n,)
+    x, v, xerror, verror = drift_kepler(x, v, xerror, verror, h2, m, pair, n,)
     # 4. Kick-pair correction.
-    v, verror = phic(x,v,verror,h,m,pair,n,)
+    v, verror = phic(x, v, verror, h, m, pair, n,)
     # 5. Fourth-order Kepler-pair correction.
-    v, verror = phisalpha(x,v,verror,h,jnp.asarray(2.0, dtype=x.dtype),m,pair,n,)
+    v, verror = phisalpha(x, v, verror, h, jnp.asarray(2.0, dtype=x.dtype), m, pair, n,)
     # 6. Kepler + drift in reverse pair order.
     x, v, xerror, verror = kepler_drift(x, v, xerror, verror, h2, m, pair, n,)
     # 7. Half drift.
     x, xerror = drift(x, v, xerror, h2,)
     # 8. Final fast kick.
-    v, verror = kickfast(x, v, verror,h6, m, pair, n,)
+    v, verror = kickfast(x, v, verror, h6, m, pair, n,)
 
     # Compute dqdt (phase-space time derivatives) needed by the transit-timing
     # Newton refinement (gd_func). dqdt[7*i + 0:3] = velocity of body i,
@@ -82,11 +77,8 @@ def compute_dqdt_no_grad(state):
     only for the transit-timing Newton refinement, not part of the AHL21
     step itself).
     """
-    x = state.x
-    v = state.v
-    m = state.m
-    n = state.n
-
+    x, v = state.x, state.v
+    m, n = state.m, state.n
     dtype = x.dtype
     eps = jnp.finfo(dtype).eps
 
@@ -118,7 +110,6 @@ def _safe_denominator(value: Array, eps: Array,):
 def _cubic1_jax(a, b, c):
     '''Return one real solution of x³ + a x² + b x + c = 0'''
     dtype = jnp.result_type(a, b, c)
-
     one_third = jnp.asarray(1.0 / 3.0, dtype=dtype)
     one_half = jnp.asarray(0.5, dtype=dtype)
 
@@ -150,8 +141,7 @@ def _cubic1_jax(a, b, c):
 
 def _sincos_half_gamma(gamma, beta0):
     """(sin, cos) of gamma/2 for bound orbits, (sinh, cosh) for unbound ones."""
-    return lax.cond(beta0 > 0.0,
-        lambda z: (jnp.sin(z), jnp.cos(z),),
+    return lax.cond(beta0 > 0.0, lambda z: (jnp.sin(z), jnp.cos(z),),
         lambda z: (jnp.sinh(z), jnp.exp(-z) + jnp.sinh(z),), 0.5 * gamma,)
 
 def _gamma_coefficients(k, r0, eta, beta0, h):
@@ -231,7 +221,6 @@ def _jac_delxv_gamma_no_grad(x0: Array, v0: Array, k: Array, h: Array, *, drift_
     x0, v0: Relative position and velocity, shape (3,).
     k: G * (m_i + m_j).
     h: Integration step.
-
     drift_first: Static Python bool.
 
     Returns
@@ -252,8 +241,8 @@ def _jac_delxv_gamma_no_grad(x0: Array, v0: Array, k: Array, h: Array, *, drift_
     r0inv = 1.0 / r0
 
     beta0 = (2.0 * k * r0inv - jnp.dot(v0, v0))
-
     beta0inv = 1.0 / beta0
+
     signb = jnp.sign(beta0)
     sqb = jnp.sqrt(signb * beta0)
 
@@ -278,7 +267,6 @@ def _jac_delxv_gamma_no_grad(x0: Array, v0: Array, k: Array, h: Array, *, drift_
         return lax.cond(eta != zero, quadratic_guess, lambda _: gamma_fallback,operand=None,)
 
     gamma_guess = lax.cond(zeta != zero, cubic_guess, noncubic_guess, operand=None,)
-
     gamma = _solve_gamma(k, r0, eta, beta0, h, gamma_guess)
     sx, cx = _sincos_half_gamma(gamma, beta0)
 
@@ -328,7 +316,6 @@ def kickfast(x, v, verror, h, m, pair, n: int,):
     dispatched every step), and i, j are static ints so `x[:, i]` compiles
     to a static slice instead of a dynamic gather.
     """
-
     for i in range(n - 1):
         for j in range(i + 1, n):
             if not pair[i][j]:
@@ -350,7 +337,6 @@ def kickfast(x, v, verror, h, m, pair, n: int,):
 
 
 def phic(x, v, verror, h, m, pair, n: int,):
-    dtype = x.dtype
 
     a = jnp.zeros_like(x)
     # First pass: 2h/3 kick and acceleration.
@@ -396,14 +382,12 @@ def phic(x, v, verror, h, m, pair, n: int,):
 
             vi, vi_error = comp_sum(v[:, i], verror[:, i], m[j] * fac,)
             vj, vj_error = comp_sum(v[:, j], verror[:, j], -m[i] * fac,)
-
             v = v.at[:, i].set(vi).at[:, j].set(vj)
             verror = verror.at[:, i].set(vi_error).at[:, j].set(vj_error)
 
     return v, verror
 
 def phisalpha(x, v, verror, h, alpha, m, pair, n: int,):
-    dtype = x.dtype
 
     coeff = (alpha * h**3 * GNEWT / 48.0)
     a = jnp.zeros_like(x)
@@ -432,7 +416,6 @@ def phisalpha(x, v, verror, h, alpha, m, pair, n: int,):
             rij = x[:, i] - x[:, j]
 
             r2 = jnp.dot(rij, rij)
-
             r1 = jnp.sqrt(r2)
             ardot = jnp.dot(aij, rij)
 

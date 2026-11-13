@@ -25,7 +25,7 @@ class TransitTiming:
 
     # Runtime arrays
     count: jax.Array            # count tranist times of each body
-    dtdq: jax.Array             # \partial t_transit / \partial q ->
+    dtdq: jax.Array             # \partial t_transit / \partial q -> for most recent transit
     gsave: jax.Array            # save the g_func()
     s_prior: Any                # last state before transit happen, position, velocity, time, Jacobian, mass, other Integration state
     s_transit: Any              # transit state

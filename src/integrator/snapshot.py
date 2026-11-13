@@ -131,8 +131,7 @@ def calc_dbvdq(s, i, j):
     djvx = s.jac_step[indj + 3, :] - s.jac_step[indi + 3, :]  #\p(vxj - vxi) / \p(q0), (7n, )
     djvy = s.jac_step[indj + 4, :] - s.jac_step[indi + 4, :]  #\p(vyj - vyi) / \p(q0), (7n, )
 
-    # From implicit differentiation of
-    #     g(t(q), q) = 0:
+    # From implicit differentiation ofng(t(q), q) = 0:
     #     dt/dq = -(partial g / partial q) / (dg/dt).
     dtdq = -(djx * dvx + djy * dvy + djvx * dx + djvy * dy) / gdot
     # Explicit derivative at fixed time, plus the implicit
@@ -158,7 +157,6 @@ def calc_dbvdelements(dbvdq0, jac_init):
         Shape (2, n, nt, 7, n).
 
         For each observable (2, vsky, bsky2, axis = 0), body (n, axis = 1), and transit (axis = 2, transit event):
-
             dbvdq0[ibv, body, transit]
 
         has shape (7, n).
@@ -179,16 +177,13 @@ def calc_dbvdelements(dbvdq0, jac_init):
     jac_init = jnp.asarray(jac_init)
 
     if dbvdq0.ndim != 5:
-        raise ValueError(
-            "dbvdq0 must have shape (2, n, nt, 7, n); "
-            f"got {dbvdq0.shape}."
-        )
+        raise ValueError("dbvdq0 must have shape (2, n, nt, 7, n); got {dbvdq0.shape}.")
 
     n = dbvdq0.shape[-1]
     expected_size = 7 * n
     # Perform this for all ibv, bodies, and transits simultaneously.
     dq0_flat = jnp.swapaxes(dbvdq0,-1,-2,).reshape(*dbvdq0.shape[:-2],expected_size,)
 
-    result_flat = jnp.einsum("...p,pq->...q",dq0_flat,jac_init,)
+    result_flat = jnp.einsum("...p,pq->...q",dq0_flat,jac_init,) # ... mutiple dimensions, broadcast
 
     return jnp.swapaxes(result_flat.reshape(*dbvdq0.shape[:-2], n, 7,),-1,-2,)

@@ -166,9 +166,60 @@ def _init_nbody_cartesian(ic):
     x = jnp.asarray(ic.x)
     v = jnp.asarray(ic.v)
     n = x.shape[1]
-    jac_init = jnp.eye(7 * n, dtype=x.dtype) 
+    jac_init = jnp.eye(7 * n, dtype=x.dtype)
 
     return x, v, jac_init
+
+def elements_to_xvm(t0: float, H):
+    '''
+    f(elements) -> (x, v, m) that jax.grad / jax.vjp can differentiate.
+
+    t0, H: initial time and hierarchy matrix, fixed (as in ElementsIC).
+    
+    elements: (n, 7) in ElementsIC.FIELD_ORDER [m, P, t0, ecos_omega, esin_omega, I, Omega].
+
+    The backward pass applies the analytic Jacobian jac_init = dq0/d(elements), so
+    reverse mode never differentiates through the Kepler solver. 
+    '''
+    epsilon = np.asarray(H, dtype=np.float64)
+    epsilon_key = tuple(map(tuple, epsilon.tolist()))
+    nbody = int(epsilon.shape[0])
+    t0 = jnp.asarray(t0, dtype=jnp.float64)
+
+    def _forward(elements):
+        m = elements[:, 0]
+        x, v, jac_init = _init_nbody_elements_jit(t0, elements, m, _amatrix_traceable(epsilon, m),
+                                                  epsilon_key=epsilon_key, der=True, nbody=nbody,)
+        return (x, v, m), jac_init
+
+    @jax.custom_vjp
+    def f(elements):
+        return _forward(elements)[0]
+
+    def f_bwd(jac_init, cotangents):
+        x_bar, v_bar, m_bar = cotangents
+        # body-major q = [x, y, z, vx, vy, vz, m] per body, the row order of jac_init
+        q_bar = jnp.concatenate((x_bar.T, v_bar.T, m_bar[:, None]), axis=1).reshape(7 * nbody)
+        # jac_init columns per body: [P, t0, ecos_omega, esin_omega, I, Omega, m]
+        el_bar = (q_bar @ jac_init).reshape(nbody, 7)
+        return (jnp.roll(el_bar, 1, axis=1),)  # -> ElementsIC order [m, P, t0, ...]
+
+    f.defvjp(_forward, f_bwd)
+    return f
+
+def _amatrix_traceable(epsilon, masses):
+    '''
+    amatrix (initial_conditions.py) with the Python `if denom != 0` replaced by a
+    select, so it can be traced with abstract masses. epsilon is concrete.
+    '''
+    N = epsilon.shape[0]
+    A = jnp.zeros((N, N), dtype=masses.dtype)
+    for i in range(N):
+        for j in range(N):
+            denom = sigma_m_init(masses, i, j, epsilon)
+            safe_denom = jnp.where(denom != 0.0, denom, 1.0)
+            A = A.at[i, j].set(jnp.where(denom != 0.0, epsilon[i, j] * masses[j] / safe_denom, 0.0))
+    return A
 
 def sigma_m_init(mass, i, j, epsilon):
     '''

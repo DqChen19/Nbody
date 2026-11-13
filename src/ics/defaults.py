@@ -19,19 +19,29 @@ def get_trappist1_elements(t0 = 0.0, n = 0):
 
 def get_kepler36_elements(t0 = 0.0, n = 0):
     elements = jnp.array([[1.0,                    0.0,      0.0,                 0.0,   0.0,   1.5707963267948966, 0.0],
-        [1.2479484222582662e-5, 13.83989,  0.0,                 0.002, -0.004, 1.5707963267948966, 0.0],
+                        [1.2479484222582662e-5, 13.83989,  0.0,                 0.002, -0.004, 1.5707963267948966, 0.0],
         [2.2659378094037732e-5, 16.23855,  5.062100000213832,  -0.01,   0.007, 1.5707963267948966, 0.0]])
     return elements
+
+def get_kepler51_elements(t0 = 0.0, n = 0):
+    elements = jnp.array([[1.0,                    0.0,      0.0,                 0.0,   0.0,   1.5707963267948966, 0.0],
+                        [1.31e-5, 45.1542,  159.111, -0.12, -0.16, 0.0, 0.0],
+                        [1.17e-5, 85.3143,  295.321, -0.09, -0.06, 0.0, 0.0],
+                        [1.58e-5, 130.1852, 212.024, -0.10, -0.05, 0.0, 0.0]])
+    return elements
+
 
 ###
 AVAILABLE_SYSTEMS: tuple[tuple[str, ...], ...] = (
     ("trappist-1", "trappist 1"),
-    ("kepler-36", "kepler 36")
+    ("kepler-36", "kepler 36"),
+    ("kepler-51", "kepler 51")
 )
 
 ELEMENT_FUNCTIONS: dict[str, callable] = {
     "trappist-1": get_trappist1_elements,
-    "kepler-36": get_kepler36_elements
+    "kepler-36": get_kepler36_elements,
+    "kepler-51": get_kepler51_elements
 }
 ### Other useful functions:
 

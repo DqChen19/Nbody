@@ -47,7 +47,7 @@ class State:
     rtmp: Array
 
     # Static metadata
-    n: int
+    n: int # number of particles
 
     @classmethod
     def from_ic(cls, ic: InitialConditions) -> "State":
